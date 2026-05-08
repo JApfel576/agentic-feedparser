@@ -1,17 +1,12 @@
 from fastapi import FastAPI, Query
-from enum import Enum
-from typing import Annotated, Any
-import re 
-from pydantic import BaseModel, AfterValidator
+from typing import Any
+from pydantic import BaseModel, ValidationError, HttpUrl
+from urllib.parse import urlunparse
 import json
 
 
-class DefaultStr(str, Enum):
-  URL = "https://news.google.com/search?q=site%3A%20bbc.com&hl=en-US&gl=US&ceid=US%3Aen" 
-
-
-class DefaultRePattern(str, Enum):
-  pattern = r"^https?:\/\/news\.google\.com\/search\?q=site(\:|%3A)(?:%20|\s)?[a-z0-9.-]+\.com(&.*)?$"
+class Website(BaseModel):
+   url: HttpUrl
 
 
 class Header(BaseModel):
@@ -33,46 +28,43 @@ class Model(BaseModel):
 
 app = FastAPI()
 
-# Ensure url matches format for google news site search
+# Ensure url is proper format
 def check_url(url_input):
-  pattern = DefaultRePattern.pattern.value
-  url_input=str(url_input)
-  value_error_str = f"Malformed input...returning default url: {DefaultStr.URL.value}"
-  if not url_input:
-    raise ValueError(value_error_str)
-  if not re.match(pattern, url_input):
-    raise ValueError(value_error_str)
+  try: 
+     Website(url = url_input)
+  except ValidationError as e:
+    print(e)
   return url_input
 
 # Create url from one given for rss feed
 def create_url(url_input):
-  pattern = r"\.com"
-  match = re.search(pattern, url_input)
-  idx = match.end()
-  insert_str = "/rss"
-  return f"{url_input[:idx]}{insert_str}{url_input[idx:]}"
+  site = Website(url = url_input)
+  path_str = "/rss"
+  url_str = urlunparse((site.url.scheme
+                       , site.url.host
+                       , path_str
+                       , ""
+                       , site.url.query
+                       , ""))
+  return url_str
 
 # Check app health
 @app.get("/health")
 def health_check():
   return {"status": "ok"}
 
-# If url is not provided or without proper format return default
+# If correct url format is provided, return created feed url
 @app.get("/url")
-def url_provider(url_input: Annotated[str | None
-, AfterValidator(check_url)
-, Query(
-  description= "Url for google news search"
-) ] = None
-) -> str:
+def url_provider(url_input: str | None = None) -> str:
   try:
-     validated = check_url(url_input)
-     return create_url(validated) 
+     check_url(url_input)
+     return create_url(url_input) 
   except ValueError as e:
      return e
 
+# Get data using created feed url
 @app.get("/data", response_model=Model)
-def feed_data(url_input: Annotated[str | None, AfterValidator(check_url)] = None) -> Any:
+def feed_data(url_input: str | None = None) -> Any:
   data = {
     "header":{"etag":""
               , "updated":""}
@@ -82,4 +74,4 @@ def feed_data(url_input: Annotated[str | None, AfterValidator(check_url)] = None
               , "guid":""
               , "link":""}]
               }
-  return data                                 
+  return data
