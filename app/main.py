@@ -1,8 +1,9 @@
 from fastapi import FastAPI, Query
-from typing import Any
-from pydantic import BaseModel, ValidationError, HttpUrl
+from typing import Any, Annotated
+from pydantic import BaseModel, ValidationError, HttpUrl, AfterValidator
 from urllib.parse import urlunparse
 import json
+import re
 
 
 class Website(BaseModel):
@@ -26,45 +27,62 @@ class Model(BaseModel):
     header: Header
     items: list[Item]
 
+
 app = FastAPI()
 
-# Ensure url is proper format
-def check_url(url_input):
+
+def check_url(url_input:str) -> str:
+  """Ensure url is proper format"""
   try: 
      Website(url = url_input)
   except ValidationError as e:
     print(e)
   return url_input
 
-# Create url from one given for rss feed
-def create_url(url_input):
-  site = Website(url = url_input)
-  path_str = "/rss"
-  url_str = urlunparse((site.url.scheme
-                       , site.url.host
-                       , path_str
-                       , ""
-                       , site.url.query
-                       , ""))
-  return url_str
 
-# Check app health
+def convert_to_rss(url_input: str) -> str:
+  """Create url from one given for rss feed"""
+  site = Website(url = url_input)
+
+  pattern = r"q=site(\:|%3A)(?:%20|\s)?[a-z0-9.-]+\.com"
+  if not re.match(pattern, str(site.url.query)):
+    raise ValueError ("query not expected format for google news site search")
+  
+  path_str = "/rss" + site.url.path
+  return urlunparse((site.url.scheme
+                    , site.url.host
+                    , path_str
+                    , ""
+                    , site.url.query
+                    , ""))
+
+
+SearchUrl = Annotated[str, AfterValidator(check_url)]
+RssUrl = Annotated[str, AfterValidator(convert_to_rss)]
+     
+  
 @app.get("/health")
 def health_check():
+  """Check app health"""
   return {"status": "ok"}
 
-# If correct url format is provided, return created feed url
-@app.get("/url")
-def url_provider(url_input: str | None = None) -> str:
-  try:
-     check_url(url_input)
-     return create_url(url_input) 
-  except ValueError as e:
-     return e
 
-# Get data using created feed url
+@app.get("/url")
+def url_provider(url_input: SearchUrl):
+  """If correct url format is provided""" \
+  """, return created feed url"""
+  return convert_to_rss(url_input)
+
+
+@app.get("/rss")
+def rss_endpoint(url_input: RssUrl):
+   """Accepts search url and returns RSS url"""
+   return url_input
+
+
 @app.get("/data", response_model=Model)
 def feed_data(url_input: str | None = None) -> Any:
+  """Get data using created feed url"""
   data = {
     "header":{"etag":""
               , "updated":""}
