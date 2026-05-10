@@ -1,6 +1,6 @@
 from fastapi import FastAPI, Query
-from typing import Any
-from pydantic import BaseModel, ValidationError, HttpUrl
+from typing import Any, Annotated
+from pydantic import BaseModel, ValidationError, HttpUrl, AfterValidator
 from urllib.parse import urlunparse
 import json
 import re
@@ -27,6 +27,7 @@ class Model(BaseModel):
     header: Header
     items: list[Item]
 
+
 app = FastAPI()
 
 
@@ -39,20 +40,25 @@ def check_url(url_input:str) -> str:
   return url_input
 
 
-def create_url(url_input: str) -> str:
+def convert_to_rss(url_input: str) -> str:
   """Create url from one given for rss feed"""
   site = Website(url = url_input)
+
+  pattern = r"q=site(\:|%3A)(?:%20|\s)?[a-z0-9.-]+\.com"
+  if not re.match(pattern, str(site.url.query)):
+    raise ValueError ("query not expected format for google news site search")
+  
   path_str = "/rss" + site.url.path
-  url_str = urlunparse((site.url.scheme
+  return urlunparse((site.url.scheme
                     , site.url.host
                     , path_str
                     , ""
                     , site.url.query
                     , ""))
-  q_pattern = r"q=site(\:|%3A)(?:%20|\s)?[a-z0-9.-]+\.com"
-  if not re.match(q_pattern, str(site.url.query)):
-    raise ValueError ("query not expected format for google news site search")
-  return url_str
+
+
+SearchUrl = Annotated[str, AfterValidator(check_url)]
+RssUrl = Annotated[str, AfterValidator(convert_to_rss)]
      
   
 @app.get("/health")
@@ -62,14 +68,16 @@ def health_check():
 
 
 @app.get("/url")
-def url_provider(url_input: str | None = None) -> str:
+def url_provider(url_input: SearchUrl):
   """If correct url format is provided""" \
   """, return created feed url"""
-  try:
-     check_url(url_input)
-     return create_url(url_input) 
-  except ValueError as e:
-     return e
+  return convert_to_rss(url_input)
+
+
+@app.get("/rss")
+def rss_endpoint(url_input: RssUrl):
+   """Accepts search url and returns RSS url"""
+   return url_input
 
 
 @app.get("/data", response_model=Model)
