@@ -29,16 +29,18 @@ class Model(BaseModel):
 
 app = FastAPI()
 
-# Ensure url is proper format
-def check_url(url_input):
+
+def check_url(url_input:str) -> str:
+  """Ensure url is proper format"""
   try: 
      Website(url = url_input)
   except ValidationError as e:
     print(e)
   return url_input
 
-# Create url from one given for rss feed
-def create_url(url_input):
+
+def create_url(url_input: str) -> str:
+  """Create url from one given for rss feed"""
   site = Website(url = url_input)
   path_str = "/rss" + site.url.path
   url_str = urlunparse((site.url.scheme
@@ -49,27 +51,30 @@ def create_url(url_input):
                     , ""))
   q_pattern = r"q=site(\:|%3A)(?:%20|\s)?[a-z0-9.-]+\.com"
   if not re.match(q_pattern, str(site.url.query)):
-    return "query not expected format for google news site search"
+    raise ValueError ("query not expected format for google news site search")
   return url_str
      
   
-# Check app health
 @app.get("/health")
 def health_check():
+  """Check app health"""
   return {"status": "ok"}
 
-# If correct url format is provided, return created feed url
+
 @app.get("/url")
 def url_provider(url_input: str | None = None) -> str:
+  """If correct url format is provided""" \
+  """, return created feed url"""
   try:
      check_url(url_input)
      return create_url(url_input) 
   except ValueError as e:
      return e
 
-# Get data using created feed url
+
 @app.get("/data", response_model=Model)
 def feed_data(url_input: str | None = None) -> Any:
+  """Get data using created feed url"""
   data = {
     "header":{"etag":""
               , "updated":""}
