@@ -3,6 +3,7 @@ from typing import Any
 from pydantic import BaseModel, ValidationError, HttpUrl
 from urllib.parse import urlunparse
 import json
+import re
 
 
 class Website(BaseModel):
@@ -39,15 +40,19 @@ def check_url(url_input):
 # Create url from one given for rss feed
 def create_url(url_input):
   site = Website(url = url_input)
-  path_str = "/rss"
+  path_str = "/rss" + site.url.path
   url_str = urlunparse((site.url.scheme
-                       , site.url.host
-                       , path_str
-                       , ""
-                       , site.url.query
-                       , ""))
+                    , site.url.host
+                    , path_str
+                    , ""
+                    , site.url.query
+                    , ""))
+  q_pattern = r"q=site(\:|%3A)(?:%20|\s)?[a-z0-9.-]+\.com"
+  if not re.match(q_pattern, str(site.url.query)):
+    return "query not expected format for google news site search"
   return url_str
-
+     
+  
 # Check app health
 @app.get("/health")
 def health_check():
