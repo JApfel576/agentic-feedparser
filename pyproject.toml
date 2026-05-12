@@ -3,7 +3,7 @@ name = "genai-pipeline-project"
 version = "0.1.0"
 
 [tool.fastapi]
-entrypoint = "app.main:app"
+entrypoint = "services.fastapi-app.src.fastapi-app.main:app"
 
 [tool.uv.workspace]
 members = [

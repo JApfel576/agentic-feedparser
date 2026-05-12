@@ -12,7 +12,7 @@ ENTRY_KEYS = ['title', 'summary', 'published', 'published_parsed', 'guid', 'link
 
 
 class FeedPoller():
-  def __init__(self, url, out_dir="/var/data"):
+  def __init__(self, url, out_dir="var/data"):
     self.url = url
     self.header_keys = HEADER_KEYS
     self.entry_keys = ENTRY_KEYS

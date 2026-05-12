@@ -4,7 +4,8 @@ from pydantic import BaseModel, ValidationError, HttpUrl, AfterValidator
 from urllib.parse import urlunparse
 import json
 import re
-from code.src import main as poller
+from packages.feedpoller.src import feedpoller
+
 
 class Website(BaseModel):
    url: HttpUrl
@@ -60,7 +61,18 @@ def convert_to_rss(url_input: str) -> str:
 SearchUrl = Annotated[str, AfterValidator(check_url)]
 RssUrl = Annotated[str, AfterValidator(convert_to_rss)]
      
-  
+
+def rss_poller(url_input: str) -> dict[str, bool]:
+  poller = feedpoller.FeedPoller()
+  rss_poller = feedpoller(url_input)
+  changed = rss_poller.poll()
+  if changed:
+      print("Feed changed — new file saved")
+      return {"feed_changed": True}
+  print("No change")
+  return {"feed_changed": False}
+
+
 @app.get("/health")
 def health_check():
   """Check app health"""
@@ -83,7 +95,7 @@ def rss_endpoint(url_input: RssUrl):
 @app.get("/data", response_model=Model)
 def feed_data(url_input: RssUrl) -> Any:
   """Get data using created feed url"""
-  result = poller.main()
+  result = rss_poller(url_input)
   if result.feed_changed:
      print("Getting file")
   print("Not getting file")
