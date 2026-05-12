@@ -10,9 +10,9 @@ def main(url: str = REUTERS_URL) -> dict[str, bool]:
   changed = poller.poll()
   if changed:
       print("Feed changed — new file saved")
-      return {"Feed changed": True}
+      return {"feed_changed": True}
   print("No change")
-  return {"Feed changed": False}
+  return {"feed_changed": False}
 
 if __name__ == "__main__":
     main()

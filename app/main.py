@@ -4,7 +4,7 @@ from pydantic import BaseModel, ValidationError, HttpUrl, AfterValidator
 from urllib.parse import urlunparse
 import json
 import re
-
+from code.src import main as poller
 
 class Website(BaseModel):
    url: HttpUrl
@@ -81,8 +81,12 @@ def rss_endpoint(url_input: RssUrl):
 
 
 @app.get("/data", response_model=Model)
-def feed_data(url_input: str | None = None) -> Any:
+def feed_data(url_input: RssUrl) -> Any:
   """Get data using created feed url"""
+  result = poller.main()
+  if result.feed_changed:
+     print("Getting file")
+  print("Not getting file")
   data = {
     "header":{"etag":""
               , "updated":""}
