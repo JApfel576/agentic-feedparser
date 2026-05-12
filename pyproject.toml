@@ -1,2 +1,11 @@
+[project]
+name = "genai-pipeline-project"
+version = "0.1.0"
+
 [tool.fastapi]
 entrypoint = "app.main:app"
+
+[tool.uv.workspace]
+members = [
+    "packages/feedpoller",
+]
