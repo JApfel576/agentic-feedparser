@@ -8,4 +8,5 @@ entrypoint = "app.main:app"
 [tool.uv.workspace]
 members = [
     "packages/feedpoller",
+    "services/fastapi-app",
 ]
