@@ -1,4 +1,4 @@
-from feedpoller import FeedPoller 
+from packages.feedpoller.src.feedpoller import FeedPoller 
 import json
 
 REUTERS_URL = ("https://news.google.com/rss/search"
