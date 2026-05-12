@@ -1,0 +1,25 @@
+version = 1
+revision = 3
+requires-python = ">=3.11"
+
+[manifest]
+members = [
+    "fastapi-app",
+    "feedpoller",
+    "genai-pipeline-project",
+]
+
+[[package]]
+name = "fastapi-app"
+version = "0.1.0"
+source = { virtual = "services/fastapi-app" }
+
+[[package]]
+name = "feedpoller"
+version = "0.1.0"
+source = { virtual = "packages/feedpoller" }
+
+[[package]]
+name = "genai-pipeline-project"
+version = "0.1.0"
+source = { virtual = "." }
