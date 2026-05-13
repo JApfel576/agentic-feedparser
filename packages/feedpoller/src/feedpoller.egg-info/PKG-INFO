@@ -4,3 +4,7 @@ Version: 0.1.0
 Summary: Add your description here
 Requires-Python: >=3.11
 Description-Content-Type: text/markdown
+Requires-Dist: datetime
+Requires-Dist: feedparser
+Requires-Dist: pathlib
+Requires-Dist: requests
