@@ -12,14 +12,26 @@ members = [
 [[package]]
 name = "fastapi-app"
 version = "0.1.0"
-source = { virtual = "services/fastapi-app" }
+source = { virtual = "services/fastapi_app" }
+dependencies = [
+    { name = "feedpoller" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "feedpoller", editable = "packages/feedpoller" }]
 
 [[package]]
 name = "feedpoller"
 version = "0.1.0"
-source = { virtual = "packages/feedpoller" }
+source = { editable = "packages/feedpoller" }
 
 [[package]]
 name = "genai-pipeline-project"
 version = "0.1.0"
 source = { virtual = "." }
+dependencies = [
+    { name = "feedpoller" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "feedpoller", editable = "packages/feedpoller" }]

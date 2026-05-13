@@ -1,12 +1,18 @@
 [project]
 name = "genai-pipeline-project"
 version = "0.1.0"
+dependencies = [
+    "feedpoller",
+]
 
 [tool.fastapi]
-entrypoint = "services.fastapi-app.src.fastapi-app.main:app"
+entrypoint = "services.fastapi_app.src.fastapi_app.main:app"
 
 [tool.uv.workspace]
 members = [
     "packages/feedpoller",
-    "services/fastapi-app",
+    "services/fastapi_app",
 ]
+
+[tool.uv.sources]
+feedpoller = { workspace = true }

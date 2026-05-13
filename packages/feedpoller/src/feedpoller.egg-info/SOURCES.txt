@@ -1,0 +1,8 @@
+pyproject.toml
+src/feedpoller/__init__.py
+src/feedpoller/feedpoller.py
+src/feedpoller/main.py
+src/feedpoller.egg-info/PKG-INFO
+src/feedpoller.egg-info/SOURCES.txt
+src/feedpoller.egg-info/dependency_links.txt
+src/feedpoller.egg-info/top_level.txt
