@@ -5,6 +5,9 @@ from urllib.parse import urlunparse
 import json
 import re
 from feedpoller import FeedPoller 
+from pathlib import Path
+import logging
+
 
 class Website(BaseModel):
    url: HttpUrl
@@ -28,6 +31,7 @@ class Model(BaseModel):
     items: list[Item]
 
 
+logger = logging.getLogger(__name__)
 app = FastAPI()
 
 
@@ -57,18 +61,22 @@ def convert_to_rss(url_input: str) -> str:
                     , ""))
 
 
+def recent_feed_data(path: str = "var/data") -> str:
+  """Get most recent file name for feed data"""
+  file_path = Path(path)
+  files = [
+     str(p.resolve()) for p in file_path.iterdir() if p.is_file()
+     ]
+  files_data = sorted([
+     f for f in files if 'state.json' not in f
+     ])
+  if not files_data:
+     return None
+  return files_data[-1]
+  
+
 SearchUrl = Annotated[str, AfterValidator(check_url)]
 RssUrl = Annotated[str, AfterValidator(convert_to_rss)]
-     
-
-def rss_poller(url_input: str) -> dict[str, bool]:
-  rss_poller = FeedPoller(url=url_input)
-  changed = rss_poller.poll()
-  if changed:
-      print("Feed changed — new file saved")
-      return {"feed_changed": True}
-  print("No change")
-  return {"feed_changed": False}
 
 
 @app.get("/health")
@@ -96,15 +104,14 @@ def feed_data(url_input: RssUrl) -> Any:
   rss_poller = FeedPoller(url_input)
   result = rss_poller.poll()
   if result:
-     print("Getting file")
-  print("Not getting file")
-  data = {
-    "header":{"etag":""
-              , "updated":""}
-    , "items": [{"title":"test"
-              , "summary":""
-              , "published":""
-              , "guid":""
-              , "link":""}]
-              }
-  return data
+     file = recent_feed_data()
+     print(file)
+     try:
+        with open(file, 'r') as f:
+           data = json.load(f)
+        logger.info("Loaded feed data from file") 
+        return data
+     except FileNotFoundError:
+        logger.error("File was not found")
+     except json.decoder.JSONDecodeError:
+        logger.error("File was not serialized")
