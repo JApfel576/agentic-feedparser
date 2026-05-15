@@ -61,7 +61,15 @@ def convert_to_rss(url_input: str) -> str:
                     , ""))
 
 
-def recent_feed_data(path: str = "var/data") -> str:
+def extract_site(url_input: RssUrl) -> str:
+   """Format site portion of query to folder name for data"""
+   pattern = "[A-Za-z]+\.com"
+   site = re.findall(pattern, url_input)
+   site_fmtd = re.sub("\\.","_", site[1])
+   return site_fmtd
+
+
+def recent_feed_data(path: str) -> str:
   """Get most recent file name for feed data"""
   file_path = Path(path)
   files = [
@@ -101,10 +109,13 @@ def rss_endpoint(url_input: RssUrl):
 @app.get("/data", response_model=Model)
 def feed_data(url_input: RssUrl) -> Any:
   """Get data using created feed url"""
-  rss_poller = FeedPoller(url_input)
+  site_folder = extract_site(url_input)
+  out_dir = f"var/data/{site_folder}"
+  rss_poller = FeedPoller(url = url_input
+                          , out_dir = out_dir)
   result = rss_poller.poll()
   if result:
-     file = recent_feed_data()
+     file = recent_feed_data(path = out_dir)
      print(file)
      try:
         with open(file, 'r') as f:
@@ -115,3 +126,14 @@ def feed_data(url_input: RssUrl) -> Any:
         logger.error("File was not found")
      except json.decoder.JSONDecodeError:
         logger.error("File was not serialized")
+  else:
+      data = {
+         "header":{"etag":""
+                  , "updated":""}
+            , "items": [{"title":"test"
+                     , "summary":""
+                     , "published":""
+                     , "guid":""
+                     , "link":""}]
+               }
+      return data

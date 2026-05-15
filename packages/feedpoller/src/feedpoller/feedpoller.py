@@ -16,7 +16,7 @@ class FeedPoller():
     self.url = url
     self.header_keys = HEADER_KEYS
     self.entry_keys = ENTRY_KEYS
-    self.out_dir = f"var/data/{out_dir}"
+    self.out_dir = out_dir
     Path(self.out_dir).mkdir(parents=True, exist_ok=True)
     # Store last seen values. Update to retrieve
     self.last_etag = None 
