@@ -79,3 +79,8 @@ members = [
 
 [tool.uv.sources]
 feedpoller = { workspace = true }
+
+[dependency-groups]
+dev = [
+    "ruff>=0.15.13",
+]

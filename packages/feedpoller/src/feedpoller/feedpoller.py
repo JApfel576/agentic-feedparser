@@ -3,7 +3,6 @@ import feedparser
 from datetime import datetime, timezone
 from pathlib import Path
 import hashlib
-import platform
 import json
 
 

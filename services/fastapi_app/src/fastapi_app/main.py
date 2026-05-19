@@ -1,10 +1,10 @@
-from fastapi import FastAPI, Query
+from fastapi import FastAPI
 from typing import Any, Annotated
 from pydantic import BaseModel, ValidationError, HttpUrl, AfterValidator
 from urllib.parse import urlunparse
 import json
 import re
-from feedpoller import FeedPoller 
+from feedpoller import FeedPoller
 from pathlib import Path
 import logging
 
@@ -61,9 +61,9 @@ def convert_to_rss(url_input: str) -> str:
                     , ""))
 
 
-def extract_site(url_input: RssUrl) -> str:
+def extract_site(url_input: str) -> str:
    """Format site portion of query to folder name for data"""
-   pattern = "[A-Za-z]+\.com"
+   pattern = "[A-Za-z]+.com"
    site = re.findall(pattern, url_input)
    site_fmtd = re.sub("\\.","_", site[1])
    return site_fmtd
