@@ -5,6 +5,7 @@ FROM python:${PYTHON_VERSION}-slim AS base
 
 # copy uv binary
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
+ENV UV_LINK_MODE=copy
 
 # Set location for uv to leverage .venv without activation 
 ENV UV_PROJECT_ENVIRONMENT="/usr/local" 
