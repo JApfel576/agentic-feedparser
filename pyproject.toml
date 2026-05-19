@@ -84,3 +84,6 @@ feedpoller = { workspace = true }
 dev = [
     "ruff>=0.15.13",
 ]
+
+[tool.ruff.lint]
+extend-select = ["FAST001", "FAST002", "FAST003", "UP"]
