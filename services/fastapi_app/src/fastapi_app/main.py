@@ -4,6 +4,9 @@ from pydantic import BaseModel, ValidationError, HttpUrl, AfterValidator
 from urllib.parse import urlunparse
 import json
 import re
+from feedpoller import FeedPoller 
+from pathlib import Path
+import logging
 
 
 class Website(BaseModel):
@@ -28,6 +31,7 @@ class Model(BaseModel):
     items: list[Item]
 
 
+logger = logging.getLogger(__name__)
 app = FastAPI()
 
 
@@ -57,10 +61,32 @@ def convert_to_rss(url_input: str) -> str:
                     , ""))
 
 
+def extract_site(url_input: RssUrl) -> str:
+   """Format site portion of query to folder name for data"""
+   pattern = "[A-Za-z]+\.com"
+   site = re.findall(pattern, url_input)
+   site_fmtd = re.sub("\\.","_", site[1])
+   return site_fmtd
+
+
+def recent_feed_data(path: str) -> str:
+  """Get most recent file name for feed data"""
+  file_path = Path(path)
+  files = [
+     str(p.resolve()) for p in file_path.iterdir() if p.is_file()
+     ]
+  files_data = sorted([
+     f for f in files if 'state.json' not in f
+     ])
+  if not files_data:
+     return None
+  return files_data[-1]
+  
+
 SearchUrl = Annotated[str, AfterValidator(check_url)]
 RssUrl = Annotated[str, AfterValidator(convert_to_rss)]
-     
-  
+
+
 @app.get("/health")
 def health_check():
   """Check app health"""
@@ -81,15 +107,34 @@ def rss_endpoint(url_input: RssUrl):
 
 
 @app.get("/data", response_model=Model)
-def feed_data(url_input: str | None = None) -> Any:
-  """Get data using created feed url"""
-  data = {
-    "header":{"etag":""
-              , "updated":""}
-    , "items": [{"title":"test"
-              , "summary":""
-              , "published":""
-              , "guid":""
-              , "link":""}]
-              }
-  return data
+def feed_data(url_input: RssUrl) -> Any:
+  """Get data using created feed url""" \
+  """ and store in site specific folder"""
+  site_folder = extract_site(url_input)
+  out_dir = f"/var/data/{site_folder}"
+  rss_poller = FeedPoller(url = url_input
+                          , out_dir = out_dir)
+  result = rss_poller.poll()
+  if result:
+     file = recent_feed_data(path = out_dir)
+     print(file)
+     try:
+        with open(file, 'r') as f:
+           data = json.load(f)
+        logger.info("Loaded feed data from file") 
+        return data
+     except FileNotFoundError:
+        logger.error("File was not found")
+     except json.decoder.JSONDecodeError:
+        logger.error("File was not serialized")
+  else:
+      data = {
+         "header":{"etag":""
+                  , "updated":""}
+            , "items": [{"title":"test"
+                     , "summary":""
+                     , "published":""
+                     , "guid":""
+                     , "link":""}]
+               }
+      return data
