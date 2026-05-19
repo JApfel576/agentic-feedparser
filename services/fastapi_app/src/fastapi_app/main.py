@@ -115,7 +115,7 @@ def feed_data(url_input: RssUrl) -> Any:
         file = recent_feed_data(path=out_dir)
         print(file)
         try:
-            with open(file, "r") as f:
+            with open(file) as f:
                 data = json.load(f)
             logger.info("Loaded feed data from file")
             return data
