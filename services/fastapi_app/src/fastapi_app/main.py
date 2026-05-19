@@ -109,9 +109,9 @@ def rss_endpoint(url_input: RssUrl):
 @app.get("/data", response_model=Model)
 def feed_data(url_input: RssUrl) -> Any:
   """Get data using created feed url""" \
-  """and store in site specific folder"""
+  """ and store in site specific folder"""
   site_folder = extract_site(url_input)
-  out_dir = f"var/data/{site_folder}"
+  out_dir = f"/var/data/{site_folder}"
   rss_poller = FeedPoller(url = url_input
                           , out_dir = out_dir)
   result = rss_poller.poll()

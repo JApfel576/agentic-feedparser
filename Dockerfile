@@ -34,7 +34,7 @@ COPY . /app
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --locked
 
-# create directory for volume data
+# create directory for volume data and give permissions to create folders and files
 RUN mkdir -p /var/data \
 && chown -R appuser:appuser /var/data
 
