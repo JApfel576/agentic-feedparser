@@ -1,1 +1,1 @@
-from feedpoller.feedpoller import FeedPoller
+from feedpoller.feedpoller import FeedPoller as FeedPoller
