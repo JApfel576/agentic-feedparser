@@ -1,16 +1,46 @@
 # genai-pipeline-project
+# RSS Feed Poller for Targeted RAG Pipelines
 
-This is a repo for a Gen AI project. Structure below:
+  
+
+This project provides a small RSS feed poller that pulls article metadata from any site indexed by Google News. Instead of scraping full pages upfront, it collects only titles, summaries, and links so an LLM can decide which articles are worth deeper processing.
+
+  
+
+## How It Works
+
+  
+
+1. Poll Google News RSS feeds 
+**DONE**
+
+2. Extract minimal metadata (title, summary, link, timestamps) **DONE**
+
+3. Store only new or updated entries 
+**DONE**
+
+4. Let an LLM choose which articles to fully scrape 
+**TODO**
+
+6. Optionally fetch, convert to Markdown, chunk, and embed **TODO**
+
+  
+
+## Why Use It
+
+  
+
+This approach avoids scraping entire sites unless the metadata indicates the article is relevant, making RAG ingestion faster and more efficient.
+
+  
+
+## Structure
+
+  
+
 ```
-+---packages
 
-| \---feedpoller
-
-| | pyproject.toml
-
-| |
-
-| \---src
+|---src
 
 | +---feedpoller
 
@@ -18,27 +48,19 @@ This is a repo for a Gen AI project. Structure below:
 
 | | | __init__.py
 
-| | |
-
-| | \---__pycache__
-
-| | feedpoller.cpython-314.pyc
-
-| | __init__.cpython-314.pyc
-
 | |
 
 | \---feedpoller.egg-info
 
-| dependency_links.txt
+| | dependency_links.txt
 
-| PKG-INFO
+| | PKG-INFO
 
-| requires.txt
+| | requires.txt
 
-| SOURCES.txt
+| | SOURCES.txt
 
-| top_level.txt
+| | top_level.txt
 
 |
 
@@ -55,12 +77,6 @@ This is a repo for a Gen AI project. Structure below:
 | \---fastapi_app
 
 | | main.py
-
-| |
-
-| \---__pycache__
-
-| main.cpython-314.pyc
 
 |
 
@@ -81,4 +97,5 @@ This is a repo for a Gen AI project. Structure below:
 20260515_183846.json
 
 state.json
+
 ```
