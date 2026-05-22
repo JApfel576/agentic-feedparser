@@ -2,6 +2,7 @@ from dotenv import load_dotenv
 import os
 from langchain.agents import create_agent
 from langchain.tools import tool
+from langgraph.checkpoint.memory import InMemorySaver
 
 load_dotenv()
 api_key = os.getenv("OPENAI_API_KEY")
@@ -10,8 +11,7 @@ api_key = os.getenv("OPENAI_API_KEY")
 @tool
 def relevant_site(topic: str) -> str:
     (
-        """Provide relevant site for topic."""
-        """ Sites and topics must be appropriate for all audiences"""
+        """Provide a relevant site for a topic."""
     )
     return "A site relevant to that topic would be <site>"
 
@@ -25,10 +25,11 @@ def guess_url(site: str) -> str:
 agent = create_agent(
     model="openai:gpt-4o-mini",
     tools=[relevant_site, guess_url],
-    system_prompt="You are a helpful assistant",
+    system_prompt="You are a helpful assistant that keeps messages brief purely for answering user questions",
+    checkpointer = InMemorySaver()
 )
 
-topic = "unbiased reporting on current events"
+topic = "unbiased reporting on current global events"
 
 messages = [
     {
@@ -37,10 +38,11 @@ messages = [
     },
     {
         "role": "user",
-        "content": "What is the full url after appending site: site to query in news.google.com/search",
+        "content": "What is the full url after appending site: <ai_provided_site> to query in news.google.com/search",
     },
 ]
 
-result = agent.invoke({"messages": messages[0]})
+result = agent.invoke({"messages": messages},
+                       {"configurable":{"thread_id":"1"}})
 
 print(result["messages"][-1].content_blocks)
