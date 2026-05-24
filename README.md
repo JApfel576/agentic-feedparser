@@ -20,7 +20,7 @@ This project provides a small RSS feed poller that pulls article metadata from a
 **DONE**
 
 4. Let an LLM choose which articles to fully scrape 
-**TODO**
+**IN PROGRESS**
 
 6. Optionally fetch, convert to Markdown, chunk, and embed **TODO**
 
