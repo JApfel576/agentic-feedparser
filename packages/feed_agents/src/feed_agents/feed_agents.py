@@ -39,6 +39,36 @@ class MessagesState(TypedDict):
     llm_calls: int
 
 
+class RoutingState(TypedDict):
+    messages: list[AnyMessage]
+    tool_type: str
+
+
+def classify_message(state: RoutingState) -> dict:
+    """Classify messages to return tool type"""
+    content = state["messages"][-1].content.lower()
+    if "tld" in content:
+        return {"tool_type": "url_thru_tld"}
+    if "query" in content:
+        return {"tool_type": "url_thru_query"}
+
+
+def route_by_tool(
+    state: RoutingState,
+) -> Literal["url_thru_tld_node", "url_thru_query_node"]:
+    return f"{state['tool_type']}_node"
+
+
+def url_thru_tld_handler(state: RoutingState) -> dict:
+    result = relevant_site.invoke(state["messages"][-1].content)
+    return [{"messages": state["messages"]}] + [{"role": "tool", "content": result}]
+
+
+def url_thru_query_handler(state: RoutingState) -> dict:
+    result = guess_url.invoke(state["messages"][-1].content)
+    return [{"messages": state["messages"]}] + [{"role": "tool", "content": result}]
+
+
 def llm_call(state: dict):
     """LLM decides whether to call a tool or not"""
     return {
@@ -80,18 +110,31 @@ agent_builder = StateGraph(MessagesState)
 
 # Add nodes
 agent_builder.add_node("llm_call", llm_call)
+agent_builder.add_node("classifier", classify_message)
 agent_builder.add_node("tool_node", tool_node)
+agent_builder.add_node("url_thru_tld_node", url_thru_tld_handler)
+agent_builder.add_node("url_thru_query_node", url_thru_tld_handler)
+
 
 # Add edges to connect nodes
 agent_builder.add_edge(START, "llm_call")
-agent_builder.add_conditional_edges("llm_call", should_continue, ["tool_node", END])
-agent_builder.add_edge("tool_node", "llm_call")
+agent_builder.add_conditional_edges("classifier", route_by_tool)
+agent_builder.add_conditional_edges(
+    "url_thru_tld_node", should_continue, ["url_thru_tld_node", END]
+)
+agent_builder.add_conditional_edges(
+    "url_thru_query_node", should_continue, ["url_thru_query_node", END]
+)
+# agent_builder.add_edge("url_thru_tld_node", END)
+# agent_builder.add_edge("url_thru_query_node", END)
+# agent_builder.add_conditional_edges("llm_call", should_continue, ["tool_node", END])
+# agent_builder.add_edge("tool_node", "llm_call")
 
 # Compile agent
 agent = agent_builder.compile()
 
 # Show agent
-display(Image(agent.get_graph(xray=True).draw_mermaid_png()))
+# display(Image(agent.get_graph(xray=True).draw_mermaid_png()))
 
 
 topic = (
@@ -108,8 +151,7 @@ messages = [
 
 
 # Invoke
-messages = agent.invoke({"messages": messages})
-# , {"configurable":{"thread_id":"1"}}
+messages = agent.invoke({"messages": messages}, {"configurable": {"thread_id": "1"}})
 
 for m in messages["messages"]:
     m.pretty_print()
