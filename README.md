@@ -1,4 +1,3 @@
-# genai-pipeline-project
 # RSS Feed Poller for Targeted RAG Pipelines
 
   
