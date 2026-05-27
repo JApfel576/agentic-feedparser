@@ -2,7 +2,7 @@ from dotenv import load_dotenv
 import os
 from langchain.tools import tool
 from langchain.chat_models import init_chat_model
-from langgraph.graph import StateGraph, MessagesState, START, END
+from langgraph.graph import StateGraph, START, END
 from langchain.messages import AnyMessage, SystemMessage, ToolMessage, HumanMessage
 from typing_extensions import TypedDict
 from typing import Annotated, Literal
@@ -41,32 +41,29 @@ class MessagesState(TypedDict):
 
 class RoutingState(TypedDict):
     messages: list[AnyMessage]
-    tool_type: str
+    tool_node_name: str
 
 
-def classify_message(state: RoutingState) -> dict:
-    """Classify messages to return tool type"""
-    content = state["messages"][-1].content.lower()
-    if "tld" in content:
-        return {"tool_type": "url_thru_tld"}
-    if "query" in content:
-        return {"tool_type": "url_thru_query"}
+def classifier(state: MessagesState) -> Literal["url_thru_tld_node", "url_thru_query_node"]:
+    """Classify messages for specific tool node use"""
+    messages = state["messages"]
+    last_message = messages[-1]
+    if "TLD" in str(last_message.content):
+        return "url_thru_tld_node"
+    if "query" in str(last_message.content):
+        return "url_thru_query_node"
 
 
-def route_by_tool(
-    state: RoutingState,
-) -> Literal["url_thru_tld_node", "url_thru_query_node"]:
-    return f"{state['tool_type']}_node"
-
-
-def url_thru_tld_handler(state: RoutingState) -> dict:
+def url_thru_tld_handler(state: MessagesState) -> dict:
     result = relevant_site.invoke(state["messages"][-1].content)
-    return [{"messages": state["messages"]}] + [{"role": "tool", "content": result}]
+    return {"messages": [HumanMessage(content="TLD")]}
+#[{"messages": state["messages"]}] + [{"role": "tool", "content": result}]
 
 
-def url_thru_query_handler(state: RoutingState) -> dict:
+def url_thru_query_handler(state: MessagesState) -> dict:
     result = guess_url.invoke(state["messages"][-1].content)
-    return [{"messages": state["messages"]}] + [{"role": "tool", "content": result}]
+    return {"messages": [HumanMessage(content="Query")]}
+#[{"messages": state["messages"]}] + [{"role": "tool", "content": result}]
 
 
 def llm_call(state: dict):
@@ -110,21 +107,18 @@ agent_builder = StateGraph(MessagesState)
 
 # Add nodes
 agent_builder.add_node("llm_call", llm_call)
-agent_builder.add_node("classifier", classify_message)
+agent_builder.add_node("classifier", classifier)
 agent_builder.add_node("tool_node", tool_node)
 agent_builder.add_node("url_thru_tld_node", url_thru_tld_handler)
-agent_builder.add_node("url_thru_query_node", url_thru_tld_handler)
+agent_builder.add_node("url_thru_query_node", url_thru_query_handler)
 
 
 # Add edges to connect nodes
 agent_builder.add_edge(START, "llm_call")
-agent_builder.add_conditional_edges("classifier", route_by_tool)
-agent_builder.add_conditional_edges(
-    "url_thru_tld_node", should_continue, ["url_thru_tld_node", END]
-)
-agent_builder.add_conditional_edges(
-    "url_thru_query_node", should_continue, ["url_thru_query_node", END]
-)
+agent_builder.add_conditional_edges("llm_call", should_continue, ["tool_node","classifier"])
+agent_builder.add_edge("tool_node", "classifier")
+agent_builder.add_conditional_edges("classifier", lambda x:x, ["url_thru_tld_node","url_thru_query_node"])
+
 # agent_builder.add_edge("url_thru_tld_node", END)
 # agent_builder.add_edge("url_thru_query_node", END)
 # agent_builder.add_conditional_edges("llm_call", should_continue, ["tool_node", END])
@@ -151,7 +145,9 @@ messages = [
 
 
 # Invoke
-messages = agent.invoke({"messages": messages}, {"configurable": {"thread_id": "1"}})
-
-for m in messages["messages"]:
-    m.pretty_print()
+config = {"configurable": {"thread_id": "1"}}
+messages = agent.invoke({"messages": messages}, config)
+# state = agent.get_state(config)
+# for message in state.values.get("messages",[]):
+#     print(f"Message ID: {message.id}")
+#     print(f"Content: {message.content}")
