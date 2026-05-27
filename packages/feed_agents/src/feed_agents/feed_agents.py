@@ -2,7 +2,8 @@ from dotenv import load_dotenv
 import os
 from langchain.tools import tool
 from langchain.chat_models import init_chat_model
-from langgraph.graph import StateGraph, MessagesState, START, END
+from langgraph.graph import StateGraph, START, END
+from langgraph.checkpoint.memory import MemorySaver
 from langchain.messages import AnyMessage, SystemMessage, ToolMessage, HumanMessage
 from typing_extensions import TypedDict
 from typing import Annotated, Literal
@@ -37,6 +38,36 @@ model_with_tools = model.bind_tools(tools)
 class MessagesState(TypedDict):
     messages: Annotated[list[AnyMessage], operator.add]
     llm_calls: int
+
+
+class RoutingState(TypedDict):
+    messages: list[AnyMessage]
+    tool_type: str
+
+
+def classifier(state: RoutingState) -> dict:
+    """Classify messages to return tool type"""
+    content = state["messages"][-1].content.lower()
+    if "tld" in content:
+        return {"tool_type": "url_thru_tld"}
+    if "query" in content:
+        return {"tool_type": "url_thru_query"}
+
+
+def route_by_tool(
+    state: RoutingState,
+) -> Literal["url_thru_tld_node", "url_thru_query_node"]:
+    return f"{state['tool_type']}_node"
+
+
+def url_thru_tld_handler(state: MessagesState) -> dict:
+    result = relevant_site.invoke(state["messages"][-1].content)
+    return [{"messages": state["messages"]}] + [{"role": "tool", "content": result}]
+
+
+def url_thru_query_handler(state: MessagesState) -> dict:
+    result = guess_url.invoke(state["messages"][-1].content)
+    return [{"messages": state["messages"]}] + [{"role": "tool", "content": result}]
 
 
 def llm_call(state: dict):
@@ -80,15 +111,22 @@ agent_builder = StateGraph(MessagesState)
 
 # Add nodes
 agent_builder.add_node("llm_call", llm_call)
+agent_builder.add_node("classifier", classifier)
 agent_builder.add_node("tool_node", tool_node)
+agent_builder.add_node("url_thru_tld_node", url_thru_tld_handler)
+agent_builder.add_node("url_thru_query_node", url_thru_query_handler)
+
 
 # Add edges to connect nodes
 agent_builder.add_edge(START, "llm_call")
-agent_builder.add_conditional_edges("llm_call", should_continue, ["tool_node", END])
-agent_builder.add_edge("tool_node", "llm_call")
+agent_builder.add_conditional_edges("llm_call", should_continue, "classifier")
+agent_builder.add_conditional_edges("classifier", route_by_tool,["url_thru_tld_node","url_thru_query_node"])
+agent_builder.add_edge("tool_node","llm_call")
+
 
 # Compile agent
-agent = agent_builder.compile()
+checkpointer = MemorySaver()
+agent = agent_builder.compile(checkpointer=checkpointer)
 
 # Show agent
 display(Image(agent.get_graph(xray=True).draw_mermaid_png()))
@@ -108,8 +146,7 @@ messages = [
 
 
 # Invoke
-messages = agent.invoke({"messages": messages})
-# , {"configurable":{"thread_id":"1"}}
-
+config = {"configurable": {"thread_id": "1"}}
+messages = agent.invoke({"messages": messages}, config)
 for m in messages["messages"]:
     m.pretty_print()
