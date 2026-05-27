@@ -77,7 +77,6 @@ entrypoint = "services.fastapi_app.src.fastapi_app.main:app"
 members = [
     "packages/feedpoller",
     "services/fastapi_app",
-    "example-lib",
     "packages/feed_agents",
 ]
 
