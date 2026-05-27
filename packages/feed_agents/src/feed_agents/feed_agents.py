@@ -3,6 +3,7 @@ import os
 from langchain.tools import tool
 from langchain.chat_models import init_chat_model
 from langgraph.graph import StateGraph, START, END
+from langgraph.checkpoint.memory import MemorySaver
 from langchain.messages import AnyMessage, SystemMessage, ToolMessage, HumanMessage
 from typing_extensions import TypedDict
 from typing import Annotated, Literal
@@ -41,29 +42,32 @@ class MessagesState(TypedDict):
 
 class RoutingState(TypedDict):
     messages: list[AnyMessage]
-    tool_node_name: str
+    tool_type: str
 
 
-def classifier(state: MessagesState) -> Literal["url_thru_tld_node", "url_thru_query_node"]:
-    """Classify messages for specific tool node use"""
-    messages = state["messages"]
-    last_message = messages[-1]
-    if "TLD" in str(last_message.content):
-        return "url_thru_tld_node"
-    if "query" in str(last_message.content):
-        return "url_thru_query_node"
+def classifier(state: RoutingState) -> dict:
+    """Classify messages to return tool type"""
+    content = state["messages"][-1].content.lower()
+    if "tld" in content:
+        return {"tool_type": "url_thru_tld"}
+    if "query" in content:
+        return {"tool_type": "url_thru_query"}
+
+
+def route_by_tool(
+    state: RoutingState,
+) -> Literal["url_thru_tld_node", "url_thru_query_node"]:
+    return f"{state['tool_type']}_node"
 
 
 def url_thru_tld_handler(state: MessagesState) -> dict:
     result = relevant_site.invoke(state["messages"][-1].content)
-    return {"messages": [HumanMessage(content="TLD")]}
-#[{"messages": state["messages"]}] + [{"role": "tool", "content": result}]
+    return [{"messages": state["messages"]}] + [{"role": "tool", "content": result}]
 
 
 def url_thru_query_handler(state: MessagesState) -> dict:
     result = guess_url.invoke(state["messages"][-1].content)
-    return {"messages": [HumanMessage(content="Query")]}
-#[{"messages": state["messages"]}] + [{"role": "tool", "content": result}]
+    return [{"messages": state["messages"]}] + [{"role": "tool", "content": result}]
 
 
 def llm_call(state: dict):
@@ -115,20 +119,17 @@ agent_builder.add_node("url_thru_query_node", url_thru_query_handler)
 
 # Add edges to connect nodes
 agent_builder.add_edge(START, "llm_call")
-agent_builder.add_conditional_edges("llm_call", should_continue, ["tool_node","classifier"])
-agent_builder.add_edge("tool_node", "classifier")
-agent_builder.add_conditional_edges("classifier", lambda x:x, ["url_thru_tld_node","url_thru_query_node"])
+agent_builder.add_conditional_edges("llm_call", should_continue, "classifier")
+agent_builder.add_conditional_edges("classifier", route_by_tool,["url_thru_tld_node","url_thru_query_node"])
+agent_builder.add_edge("tool_node","llm_call")
 
-# agent_builder.add_edge("url_thru_tld_node", END)
-# agent_builder.add_edge("url_thru_query_node", END)
-# agent_builder.add_conditional_edges("llm_call", should_continue, ["tool_node", END])
-# agent_builder.add_edge("tool_node", "llm_call")
 
 # Compile agent
-agent = agent_builder.compile()
+checkpointer = MemorySaver()
+agent = agent_builder.compile(checkpointer=checkpointer)
 
 # Show agent
-# display(Image(agent.get_graph(xray=True).draw_mermaid_png()))
+display(Image(agent.get_graph(xray=True).draw_mermaid_png()))
 
 
 topic = (
@@ -147,7 +148,5 @@ messages = [
 # Invoke
 config = {"configurable": {"thread_id": "1"}}
 messages = agent.invoke({"messages": messages}, config)
-# state = agent.get_state(config)
-# for message in state.values.get("messages",[]):
-#     print(f"Message ID: {message.id}")
-#     print(f"Content: {message.content}")
+for m in messages["messages"]:
+    m.pretty_print()
