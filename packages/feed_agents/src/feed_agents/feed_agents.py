@@ -137,16 +137,20 @@ topic = (
 )
 
 
-messages = [
-    HumanMessage(content=f"What is a reliable site for {topic} with TLD as .com?"),
-    HumanMessage(
-        content="What is the full url after appending site: <ai_provided_site> to query in news.google.com/search"
-    ),
-]
-
-
-# Invoke
+# Invoke with sequential messages instead of sending them all at once
 config = {"configurable": {"thread_id": "1"}}
-messages = agent.invoke({"messages": messages}, config)
+
+# First message
+messages = agent.invoke(
+    {"messages": [HumanMessage(content=f"What is a reliable site for {topic} with TLD as .com?")]},
+    config
+)
+
+# Second message - uses the same thread_id to maintain conversation context
+messages = agent.invoke(
+    {"messages": [HumanMessage(content="What is the full url after appending site: <ai_provided_site> to query in news.google.com/search")]},
+    config
+)
+
 for m in messages["messages"]:
     m.pretty_print()
