@@ -9,23 +9,27 @@ from typing_extensions import TypedDict
 from typing import Annotated, Literal
 import operator
 from IPython.display import Image, display
+from langchain_community.utilities import GoogleSerperAPIWrapper
 
 load_dotenv()
-api_key = os.getenv("OPENAI_API_KEY")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+SERPER_API_KEY = os.getenv("SERPER_API_KEY")
 
 
 SYSTEM_PROMPT = """You are an agent - please keep going until the user's query is completely resolved, before ending your turn and yielding back to the user. Only terminate your turn when you are sure that the problem is solved. You MUST plan extensively before each function call, and reflect extensively on the outcomes of the previous function calls. DO NOT do this entire process by making function calls only, as this can impair your ability to solve the problem and think insightfully."""
 
+search = GoogleSerperAPIWrapper()
+
 
 @tool
-def relevant_site(topic: str) -> str:
-    """Provide a relevant site for input topic."""
-    return "A site relevant to that topic would be <site>"
+def relevant_site(topic: str) -> list[str]:
+    """Provide a relevant link for input topic using google serper"""
+    return search.results(k=5, query=topic)
 
 
 @tool
 def guess_url(site: str) -> str:
-    """Guess the url"""
+    """Guess the url, and only return the full url"""
     return f"The url would be {site}"
 
 
@@ -120,8 +124,10 @@ agent_builder.add_node("url_thru_query_node", url_thru_query_handler)
 # Add edges to connect nodes
 agent_builder.add_edge(START, "llm_call")
 agent_builder.add_conditional_edges("llm_call", should_continue, "classifier")
-agent_builder.add_conditional_edges("classifier", route_by_tool,["url_thru_tld_node","url_thru_query_node"])
-agent_builder.add_edge("tool_node","llm_call")
+agent_builder.add_conditional_edges(
+    "classifier", route_by_tool, ["url_thru_tld_node", "url_thru_query_node"]
+)
+agent_builder.add_edge("tool_node", "llm_call")
 
 
 # Compile agent
@@ -132,9 +138,7 @@ agent = agent_builder.compile(checkpointer=checkpointer)
 display(Image(agent.get_graph(xray=True).draw_mermaid_png()))
 
 
-topic = (
-    "unbiased reporting on current global events which would affect the stock market"
-)
+topic = "latest reliable news source affecting stock market"
 
 
 # Invoke with sequential messages instead of sending them all at once
@@ -142,14 +146,26 @@ config = {"configurable": {"thread_id": "1"}}
 
 # First message
 messages = agent.invoke(
-    {"messages": [HumanMessage(content=f"What is a reliable site for {topic} with TLD as .com?")]},
-    config
+    {
+        "messages": [
+            HumanMessage(
+                content=f"What is a reliable site for {topic} through TLD as .com?"
+            )
+        ]
+    },
+    config,
 )
 
 # Second message - uses the same thread_id to maintain conversation context
 messages = agent.invoke(
-    {"messages": [HumanMessage(content="What is the full url after appending site: <ai_provided_site> to query in news.google.com/search")]},
-    config
+    {
+        "messages": [
+            HumanMessage(
+                content="What is the full url after appending site: <ai_provided_site> to query in news.google.com/search"
+            )
+        ]
+    },
+    config,
 )
 
 for m in messages["messages"]:
