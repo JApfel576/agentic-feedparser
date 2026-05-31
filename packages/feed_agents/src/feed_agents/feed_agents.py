@@ -10,6 +10,7 @@ from typing import Annotated, Literal
 import operator
 from IPython.display import Image, display
 from langchain_community.utilities import GoogleSerperAPIWrapper
+from pydantic import BaseModel, Field
 
 load_dotenv()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
@@ -18,13 +19,33 @@ SERPER_API_KEY = os.getenv("SERPER_API_KEY")
 
 SYSTEM_PROMPT = """You are an agent - please keep going until the user's query is completely resolved, before ending your turn and yielding back to the user. Only terminate your turn when you are sure that the problem is solved. You MUST plan extensively before each function call, and reflect extensively on the outcomes of the previous function calls. DO NOT do this entire process by making function calls only, as this can impair your ability to solve the problem and think insightfully."""
 
+
+class MessagesState(TypedDict):
+    messages: Annotated[list[AnyMessage], operator.add]
+    llm_calls: int
+
+
+class RoutingState(TypedDict):
+    messages: list[AnyMessage]
+    tool_type: str
+
+
+class SiteResponseOutput(BaseModel):
+    """Structure an output for sites suggested by LLM for input topic"""
+
+    topic: str = Field(description="Input topic")
+    sites: list[str] = Field(description="Sites suggested")
+
+
 search = GoogleSerperAPIWrapper()
 
 
-@tool
-def relevant_site(topic: str) -> list[str]:
+@tool(args_schema=SiteResponseOutput, return_direct=True, response_format="content")
+def relevant_site(topic: str, sites: list[str]) -> list[str]:
     """Provide a relevant link for input topic using google serper"""
-    return search.results(k=5, query=topic)
+    results = search.results(k=5, query=topic)
+    results = results["organic"]
+    return {topic: [item.get("link") for item in results]}
 
 
 @tool
@@ -37,16 +58,6 @@ tools = [relevant_site, guess_url]
 tools_by_name = {tool.name: tool for tool in tools}
 model = init_chat_model("openai:gpt-4o-mini")
 model_with_tools = model.bind_tools(tools)
-
-
-class MessagesState(TypedDict):
-    messages: Annotated[list[AnyMessage], operator.add]
-    llm_calls: int
-
-
-class RoutingState(TypedDict):
-    messages: list[AnyMessage]
-    tool_type: str
 
 
 def classifier(state: RoutingState) -> dict:
@@ -137,36 +148,37 @@ agent = agent_builder.compile(checkpointer=checkpointer)
 # Show agent
 display(Image(agent.get_graph(xray=True).draw_mermaid_png()))
 
-
+# Topic for message
 topic = "latest reliable news source affecting stock market"
 
 
 # Invoke with sequential messages instead of sending them all at once
 config = {"configurable": {"thread_id": "1"}}
 
-# First message
-messages = agent.invoke(
+# List for agent invocation input
+agent_invoke_list = [
     {
-        "messages": [
-            HumanMessage(
-                content=f"What is a reliable site for {topic} through TLD as .com?"
-            )
-        ]
+        "message_content": f"What is a reliable site for {topic} through TLD as .com?",
+        "config": config,
     },
-    config,
-)
+    {
+        "message_content": "What is the full url after appending site: <ai_provided_site> to query in news.google.com/search",
+        "config": config,
+    },
+]
 
-# Second message - uses the same thread_id to maintain conversation context
-messages = agent.invoke(
-    {
-        "messages": [
-            HumanMessage(
-                content="What is the full url after appending site: <ai_provided_site> to query in news.google.com/search"
-            )
-        ]
-    },
-    config,
-)
+
+def agent_invoke_message(item: list[dict]) -> MessagesState:
+    """Invoke agent to execute messages synchronously"""
+    messages = agent.invoke(
+        {"messages": [HumanMessage(content=item["message_content"])]},
+        item["config"],
+    )
+    return messages
+
+
+for item in agent_invoke_list:
+    messages = agent_invoke_message(item)
 
 for m in messages["messages"]:
     m.pretty_print()
