@@ -40,18 +40,24 @@ class SiteResponseOutput(BaseModel):
 search = GoogleSerperAPIWrapper()
 
 
-@tool(args_schema=SiteResponseOutput, return_direct=True, response_format="content")
+@tool(args_schema=SiteResponseOutput)
 def relevant_site(topic: str, sites: list[str]) -> list[str]:
     """Provide a relevant link for input topic using google serper"""
     results = search.results(k=5, query=topic)
     results = results["organic"]
-    return {topic: [item.get("link") for item in results]}
+    return {"topic": topic, "sites": [item.get("link") for item in results]}
 
 
-@tool
-def guess_url(site: str) -> str:
-    """Guess the url, and only return the full url"""
-    return f"The url would be {site}"
+@tool(args_schema=SiteResponseOutput)
+def guess_url(topic: str, sites: list[str]) -> list[str]:
+    """Prefix relevant site with google news search query url"""
+    sites = relevant_site.invoke({"topic": topic, "sites": sites})
+    prefix = "https://news.google.com/search?q="
+    full_urls = {
+        "topic": sites.get("topic"),
+        "sites": [f"{prefix}site:{sites.get('sites')}"],
+    }
+    return full_urls
 
 
 tools = [relevant_site, guess_url]
@@ -63,8 +69,6 @@ model_with_tools = model.bind_tools(tools)
 def classifier(state: RoutingState) -> dict:
     """Classify messages to return tool type"""
     content = state["messages"][-1].content.lower()
-    if "tld" in content:
-        return {"tool_type": "url_thru_tld"}
     if "query" in content:
         return {"tool_type": "url_thru_query"}
 
@@ -73,11 +77,6 @@ def route_by_tool(
     state: RoutingState,
 ) -> Literal["url_thru_tld_node", "url_thru_query_node"]:
     return f"{state['tool_type']}_node"
-
-
-def url_thru_tld_handler(state: MessagesState) -> dict:
-    result = relevant_site.invoke(state["messages"][-1].content)
-    return [{"messages": state["messages"]}] + [{"role": "tool", "content": result}]
 
 
 def url_thru_query_handler(state: MessagesState) -> dict:
@@ -128,7 +127,6 @@ agent_builder = StateGraph(MessagesState)
 agent_builder.add_node("llm_call", llm_call)
 agent_builder.add_node("classifier", classifier)
 agent_builder.add_node("tool_node", tool_node)
-agent_builder.add_node("url_thru_tld_node", url_thru_tld_handler)
 agent_builder.add_node("url_thru_query_node", url_thru_query_handler)
 
 
@@ -136,7 +134,7 @@ agent_builder.add_node("url_thru_query_node", url_thru_query_handler)
 agent_builder.add_edge(START, "llm_call")
 agent_builder.add_conditional_edges("llm_call", should_continue, "classifier")
 agent_builder.add_conditional_edges(
-    "classifier", route_by_tool, ["url_thru_tld_node", "url_thru_query_node"]
+    "classifier", route_by_tool, ["url_thru_query_node"]
 )
 agent_builder.add_edge("tool_node", "llm_call")
 
@@ -158,11 +156,7 @@ config = {"configurable": {"thread_id": "1"}}
 # List for agent invocation input
 agent_invoke_list = [
     {
-        "message_content": f"What is a reliable site for {topic} through TLD as .com?",
-        "config": config,
-    },
-    {
-        "message_content": "What is the full url after appending site: <ai_provided_site> to query in news.google.com/search",
+        "message_content": f"What is a reliable site for {topic} through TLD as .com? What is the full URL after appending it as search query to Google News URL",
         "config": config,
     },
 ]
