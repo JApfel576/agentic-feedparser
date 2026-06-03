@@ -69,13 +69,13 @@ model_with_tools = model.bind_tools(tools)
 def classifier(state: RoutingState) -> dict:
     """Classify messages to return tool type"""
     content = state["messages"][-1].content.lower()
-    if "query" in content:
+    if "site" and "query" in content:
         return {"tool_type": "url_thru_query"}
 
 
 def route_by_tool(
     state: RoutingState,
-) -> Literal["url_thru_tld_node", "url_thru_query_node"]:
+) -> Literal["url_thru_query_node"]:
     return f"{state['tool_type']}_node"
 
 
@@ -126,8 +126,8 @@ agent_builder = StateGraph(MessagesState)
 # Add nodes
 agent_builder.add_node("llm_call", llm_call)
 agent_builder.add_node("classifier", classifier)
-agent_builder.add_node("tool_node", tool_node)
 agent_builder.add_node("url_thru_query_node", url_thru_query_handler)
+agent_builder.add_node("tool_node", tool_node)
 
 
 # Add edges to connect nodes
