@@ -4,13 +4,14 @@ from langchain.tools import tool
 from langchain.chat_models import init_chat_model
 from langgraph.graph import StateGraph, START, END
 from langgraph.checkpoint.memory import MemorySaver
-from langchain.messages import AnyMessage, SystemMessage, ToolMessage, HumanMessage
+from langchain.messages import AnyMessage, SystemMessage, ToolMessage, HumanMessage, AIMessage
 from typing_extensions import TypedDict
 from typing import Annotated, Literal
 import operator
 from IPython.display import Image, display
 from langchain_community.utilities import GoogleSerperAPIWrapper
 from pydantic import BaseModel, Field
+from langchain_core.utils.function_calling import convert_to_openai_tool
 
 load_dotenv()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
@@ -59,12 +60,22 @@ def guess_url(topic: str, sites: list[str]) -> list[str]:
     }
     return full_urls
 
+# def structured_response():
+#     """Only call this tool as final step for structuring reponse"""
+#     model_structured.invoke()
 
 tools = [relevant_site, guess_url]
 tools_by_name = {tool.name: tool for tool in tools}
+tool_definitions = [convert_to_openai_tool(tool) for tool in tools]
 model = init_chat_model("openai:gpt-4o-mini")
 model_with_tools = model.bind_tools(tools)
-
+# model_with_tools = model.with_structured_output(
+#     SiteResponseOutput,
+#     method="json_schema",
+#     include_raw=False,
+#     strict=True,
+#     tools=tools
+# )
 
 def classifier(state: RoutingState) -> dict:
     """Classify messages to return tool type"""
@@ -89,7 +100,7 @@ def llm_call(state: dict):
     return {
         "messages": [
             model_with_tools.invoke(
-                [SystemMessage(content=SYSTEM_PROMPT)] + state["messages"]
+                state["messages"]
             )
         ],
         "llm_calls": state.get("llm_calls", 0) + 1,
@@ -154,20 +165,37 @@ topic = "latest reliable news source affecting stock market"
 config = {"configurable": {"thread_id": "1"}}
 
 # List for agent invocation input
-agent_invoke_list = [
+agent_invoke_human = [
     {
         "message_content": f"What is a reliable site for {topic} through TLD as .com? What is the full URL after appending it as search query to Google News URL",
         "config": config,
     },
 ]
 
+agent_invoke_system = [
+    {
+    "message_content":SYSTEM_PROMPT,
+    "config": config 
+    },
+]
+
+agent_invoke_list =[{"type":"system", "items":{k:v for item in agent_invoke_system for k,v in item.items()}},
+    {"type": "human", "items":{k:v for item in agent_invoke_human for k,v in item.items()}}
+    ]
 
 def agent_invoke_message(item: list[dict]) -> MessagesState:
     """Invoke agent to execute messages synchronously"""
-    messages = agent.invoke(
-        {"messages": [HumanMessage(content=item["message_content"])]},
-        item["config"],
-    )
+    if item.get("type") == "system":
+        messages = {"messages":[SystemMessage(
+            content=[item["items"]["message_content"]]
+            )]}
+        config = item["items"]["config"]
+        messages = agent.invoke(messages, config)
+    elif item.get("type") == "human":
+        messages = {"messages":[HumanMessage(
+            content=[item["items"]["message_content"]]
+        )]}
+        config = item["items"]["config"]
     return messages
 
 
