@@ -1,7 +1,9 @@
 from dotenv import load_dotenv
 import os
 from langchain.tools import tool
-from langchain.chat_models import init_chat_model
+
+# from langchain.chat_models import init_chat_model
+from langchain_openai import ChatOpenAI
 from langgraph.graph import StateGraph, START, END
 from langgraph.checkpoint.memory import MemorySaver
 from langchain.messages import AnyMessage, SystemMessage, ToolMessage, HumanMessage
@@ -40,7 +42,7 @@ class SiteResponseOutput(BaseModel):
 search = GoogleSerperAPIWrapper()
 
 
-@tool(args_schema=SiteResponseOutput)
+@tool(args_schema=SiteResponseOutput, return_direct=True)
 def relevant_site(topic: str, sites: list[str]) -> list[str]:
     """Provide a relevant link for input topic using google serper"""
     results = search.results(k=5, query=topic)
@@ -48,7 +50,7 @@ def relevant_site(topic: str, sites: list[str]) -> list[str]:
     return {"topic": topic, "sites": [item.get("link") for item in results]}
 
 
-@tool(args_schema=SiteResponseOutput)
+@tool(args_schema=SiteResponseOutput, return_direct=True)
 def guess_url(topic: str, sites: list[str]) -> list[str]:
     """Prefix relevant site with google news search query url"""
     sites = relevant_site.invoke({"topic": topic, "sites": sites})
@@ -62,7 +64,8 @@ def guess_url(topic: str, sites: list[str]) -> list[str]:
 
 tools = [relevant_site, guess_url]
 tools_by_name = {tool.name: tool for tool in tools}
-model = init_chat_model("openai:gpt-4o-mini")
+# model = init_chat_model("openai:gpt-4o-mini")
+model = ChatOpenAI(model="gpt-4o-mini", temperature=0)
 model_with_tools = model.bind_tools(tools)
 
 
@@ -75,13 +78,25 @@ def classifier(state: RoutingState) -> dict:
 
 def route_by_tool(
     state: RoutingState,
-) -> Literal["url_thru_tld_node", "url_thru_query_node"]:
+) -> Literal["url_thru_query_node"]:
     return f"{state['tool_type']}_node"
+
+
+def structured_output(state: MessagesState) -> dict:
+    """Return the output as a JSON"""
+    prompt = f"Extract info from user request as JSON in {state['messages']}"
+    structured_llm = model.with_structured_output(
+        SiteResponseOutput, method="json_schema"
+    )
+    result = structured_llm.invoke(prompt)
+    return [{"messages": state["messages"]}] + [{"role": "tool", "content": result}]
 
 
 def url_thru_query_handler(state: MessagesState) -> dict:
     result = guess_url.invoke(state["messages"][-1].content)
-    return [{"messages": state["messages"]}] + [{"role": "tool", "content": result}]
+    messages = [{"messages": state["messages"]}] + [{"role": "tool", "content": result}]
+    structured_result = structured_output(messages)
+    return structured_result
 
 
 def llm_call(state: dict):
@@ -156,10 +171,12 @@ config = {"configurable": {"thread_id": "1"}}
 # List for agent invocation input
 agent_invoke_list = [
     {
-        "message_content": f"What is a reliable site for {topic} through TLD as .com? What is the full URL after appending it as search query to Google News URL",
+        "message_content": f"What is a reliable site for {topic} through TLD as .com? What is the full URL after appending it as search query to Google News URL?",
         "config": config,
     },
 ]
+
+# Generate your final response as JSON
 
 
 def agent_invoke_message(item: list[dict]) -> MessagesState:
