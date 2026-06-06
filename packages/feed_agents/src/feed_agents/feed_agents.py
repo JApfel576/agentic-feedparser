@@ -5,7 +5,7 @@ from langchain.tools import tool
 from langchain_openai import ChatOpenAI
 from langgraph.graph import StateGraph, START, END
 from langgraph.checkpoint.memory import MemorySaver
-from langchain.messages import AnyMessage, SystemMessage, ToolMessage, HumanMessage
+from langchain.messages import AnyMessage, SystemMessage, ToolMessage, HumanMessage, AIMessage
 from typing_extensions import TypedDict
 from typing import Annotated, Literal
 import operator
@@ -14,6 +14,8 @@ from langchain_community.utilities import GoogleSerperAPIWrapper
 from pydantic import BaseModel, Field
 from langchain_core.output_parsers import PydanticOutputParser
 from langchain_core.prompts import PromptTemplate
+from langgraph.types import Command
+
 
 load_dotenv()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
@@ -44,7 +46,7 @@ search = GoogleSerperAPIWrapper()
 
 
 @tool(args_schema=SiteResponseOutput)
-def relevant_site(topic: str, sites: list[str]) -> list[str]:
+def relevant_site(topic: str, sites: list[str], return_direct=True, response_format="content") -> list[str]:
     """Provide a relevant link for input topic using google serper"""
     results = search.results(k=5, query=topic)
     results = results["organic"]
@@ -52,16 +54,21 @@ def relevant_site(topic: str, sites: list[str]) -> list[str]:
 
 
 @tool(args_schema=SiteResponseOutput)
-def guess_url(topic: str, sites: list[str]) -> list[str]:
+def guess_url(topic: str, sites: list[str], return_direct=True) -> list[str]:
     """Prefix relevant site with google news search query url"""
     sites = relevant_site.invoke({"topic": topic, "sites": sites})
     prefix = "https://news.google.com/search?q="
     full_urls = {
         "topic": sites.get("topic"),
-        "sites": [f"{prefix}site:{sites.get('sites')}"],
+        "sites": [f"{prefix}site:{s}" for s in sites.get("sites")],
     }
     return full_urls
 
+
+# def url_thru_query_handler(state: MessagesState, return_direct=True, response_format="content") -> dict:
+#     """guess the url and then return the result as tool call"""
+#     result = guess_url.invoke(state["messages"][-1].content)
+#     return [{"messages": state["messages"]}] + [{"role": "tool", "content": result}]
 
 tools = [relevant_site, guess_url]
 tools_by_name = {tool.name: tool for tool in tools}
@@ -73,36 +80,33 @@ model_with_tools = model.bind_tools(tools)
 def classifier(state: RoutingState) -> dict:
     """Classify messages to return tool type"""
     content = state["messages"][-1].content.lower()
-    if "query" in content:
-        return {"tool_type": "url_thru_query"}
-    if "JSON" in content:
+    if "json" in content:
         return {"tool_type": "structured_output"}
+    else:
+        return {"tool_type": "tool"}
 
 
 def route_by_tool(
     state: RoutingState,
-) -> Literal["url_thru_query_node", "structured_output_node"]:
+) -> Literal["structured_output_node", "tool_node"]:
     return f"{state['tool_type']}_node"
 
 
-def url_thru_query_handler(state: MessagesState, return_direct=True) -> dict:
-    result = guess_url.invoke(state["messages"][-1].content)
-    return [{"messages": state["messages"]}] + [{"role": "tool", "content": result}]
 
 
 def structured_output(state: MessagesState) -> dict:
-    """Return the final output as a JSON"""
+    """Return the final output from previous tool call"""
     message = state["messages"][-1].content
-    parser = PydanticOutputParser(pydantic_object=SiteResponseOutput)
-    format_instructions = parser.get_format_instructions()
-    prompt = PromptTemplate(
-        template="Analyze tool output and respond in requested format\n{format_instructions}\ntool ouput:{input}",
-        input_variables=["input"],
-        partial_variables={"format_instructions":format_instructions}
-    )
-    chain = prompt | model | parser
-    result = chain.invoke({"input":message})
-    return result
+    # parser = PydanticOutputParser(pydantic_object=SiteResponseOutput)
+    # format_instructions = parser.get_format_instructions()
+    # prompt = PromptTemplate(
+    #     template="Analyze user query and respond in requested format\n{format_instructions}\nUser Input:{input}",
+    #     input_variables=["input"],
+    #     partial_variables={"format_instructions":format_instructions}
+    # )
+    # chain = prompt | model | parser
+    # result = chain.invoke({"input":message})
+    return {"messages":message}
 
 
 def llm_call(state: dict):
@@ -148,16 +152,17 @@ agent_builder = StateGraph(MessagesState)
 agent_builder.add_node("llm_call", llm_call)
 agent_builder.add_node("classifier", classifier)
 agent_builder.add_node("tool_node", tool_node)
-agent_builder.add_node("url_thru_query_node", url_thru_query_handler)
+# agent_builder.add_node("url_thru_query_node", url_thru_query_handler)
 agent_builder.add_node("structured_output_node", structured_output)
 
 # Add edges to connect nodes
 agent_builder.add_edge(START, "llm_call")
 agent_builder.add_conditional_edges("llm_call", should_continue, "classifier")
 agent_builder.add_conditional_edges(
-    "classifier", route_by_tool, ["url_thru_query_node", "structured_output_node"]
+    "classifier", route_by_tool, ["structured_output_node", "tool_node"]
 )
-agent_builder.add_edge("tool_node", "llm_call")
+agent_builder.add_edge("structured_output_node", END)
+agent_builder.add_edge("tool_node", "llm_call") # need conditional edge
 
 
 # Compile agent
