@@ -44,19 +44,18 @@ class SiteResponseOutput(BaseModel):
 
 search = GoogleSerperAPIWrapper()
 
-
 @tool(args_schema=SiteResponseOutput)
-def relevant_site(topic: str, sites: list[str], return_direct=True, response_format="content") -> list[str]:
+def relevant_site(topic: str, sites: list[str]) -> list[str]:
     """Provide a relevant link for input topic using google serper"""
     results = search.results(k=5, query=topic)
     results = results["organic"]
     return {"topic": topic, "sites": [item.get("link") for item in results]}
 
 
-@tool(args_schema=SiteResponseOutput)
+@tool(args_schema=SiteResponseOutput, return_direct=True, response_format="content")
 def guess_url(topic: str, sites: list[str]) -> list[str]:
     """Prefix relevant site with google news search query url"""
-    sites = relevant_site.invoke({"topic": topic, "sites": sites})
+    sites = relevant_site.invoke({"topic":topic, "sites": sites})
     prefix = "https://news.google.com/search?q="
     full_urls = {
         "topic": sites.get("topic"),
@@ -65,48 +64,10 @@ def guess_url(topic: str, sites: list[str]) -> list[str]:
     return full_urls
 
 
-# def url_thru_query_handler(state: MessagesState, return_direct=True, response_format="content") -> dict:
-#     """guess the url and then return the result as tool call"""
-#     result = guess_url.invoke(state["messages"][-1].content)
-#     return [{"messages": state["messages"]}] + [{"role": "tool", "content": result}]
-
-tools = [guess_url]
+tools = [relevant_site, guess_url]
 tools_by_name = {tool.name: tool for tool in tools}
-# model = init_chat_model("openai:gpt-4o-mini")
 model = ChatOpenAI(model = "gpt-4o-mini", temperature=0)
 model_with_tools = model.bind_tools(tools)
-
-
-def classifier(state: RoutingState) -> dict:
-    """Classify messages to return tool type"""
-    content = state["messages"][-1].content.lower()
-    if "json" in content:
-        return {"tool_type": "structured_output"}
-    else:
-        return {"tool_type": "tool"}
-
-
-def route_by_tool(
-    state: RoutingState,
-) -> Literal["structured_output_node", "tool_node"]:
-    return f"{state['tool_type']}_node"
-
-
-
-
-def structured_output(state: MessagesState) -> dict:
-    """Return the final output from previous tool call"""
-    message = state["messages"][-1].content
-    # parser = PydanticOutputParser(pydantic_object=SiteResponseOutput)
-    # format_instructions = parser.get_format_instructions()
-    # prompt = PromptTemplate(
-    #     template="Analyze user query and respond in requested format\n{format_instructions}\nUser Input:{input}",
-    #     input_variables=["input"],
-    #     partial_variables={"format_instructions":format_instructions}
-    # )
-    # chain = prompt | model | parser
-    # result = chain.invoke({"input":message})
-    return {"messages":message}
 
 
 def llm_call(state: dict):
@@ -137,10 +98,13 @@ def should_continue(state: MessagesState) -> Literal["tool_node", END]:
     messages = state["messages"]
     last_message = messages[-1]
 
+    # Intercept the specific tool response and force an exit
+    if hasattr(last_message, "name") and last_message.name == "guess_url":
+        return END
+
     """If the LLM performs a tool call then perform an action"""
     if last_message.tool_calls:
         return "tool_node"
-
     """Otherwise we stop, (reply to the user)"""
     return END
 
@@ -150,20 +114,11 @@ agent_builder = StateGraph(MessagesState)
 
 # Add nodes
 agent_builder.add_node("llm_call", llm_call)
-agent_builder.add_node("classifier", classifier)
 agent_builder.add_node("tool_node", tool_node)
-# agent_builder.add_node("url_thru_query_node", url_thru_query_handler)
-agent_builder.add_node("structured_output_node", structured_output)
 
 # Add edges to connect nodes
 agent_builder.add_edge(START, "llm_call")
-agent_builder.add_conditional_edges("llm_call", should_continue, "classifier")
-agent_builder.add_conditional_edges(
-    "classifier", route_by_tool, ["structured_output_node", "tool_node"]
-)
-agent_builder.add_edge("tool_node", "llm_call")
-agent_builder.add_edge("structured_output_node", END)
-
+agent_builder.add_conditional_edges("llm_call", should_continue, {"tool_node": "tool_node", END: END})
 
 
 # Compile agent
@@ -182,11 +137,7 @@ config = {"configurable": {"thread_id": "1"}}
 # # List for agent invocation input
 agent_invoke_list = [
     {
-        "message_content": f"What is a reliable site for {topic} through TLD as .com? What is the full URL after appending it as search query to Google News URL?",
-        "config": config,
-    },
-    {
-        "message_content": f"Generate the final output as a JSON.",
+        "message_content": f"What is a reliable site for {topic} through TLD as .com? What is the full URL after appending it as search query to Google News URL? Generate the final output as a JSON.",
         "config": config,
     },
 ]
