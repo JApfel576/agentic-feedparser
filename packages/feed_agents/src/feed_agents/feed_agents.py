@@ -54,7 +54,7 @@ def relevant_site(topic: str, sites: list[str], return_direct=True, response_for
 
 
 @tool(args_schema=SiteResponseOutput)
-def guess_url(topic: str, sites: list[str], return_direct=True) -> list[str]:
+def guess_url(topic: str, sites: list[str]) -> list[str]:
     """Prefix relevant site with google news search query url"""
     sites = relevant_site.invoke({"topic": topic, "sites": sites})
     prefix = "https://news.google.com/search?q="
@@ -70,7 +70,7 @@ def guess_url(topic: str, sites: list[str], return_direct=True) -> list[str]:
 #     result = guess_url.invoke(state["messages"][-1].content)
 #     return [{"messages": state["messages"]}] + [{"role": "tool", "content": result}]
 
-tools = [relevant_site, guess_url]
+tools = [guess_url]
 tools_by_name = {tool.name: tool for tool in tools}
 # model = init_chat_model("openai:gpt-4o-mini")
 model = ChatOpenAI(model = "gpt-4o-mini", temperature=0)
@@ -161,8 +161,9 @@ agent_builder.add_conditional_edges("llm_call", should_continue, "classifier")
 agent_builder.add_conditional_edges(
     "classifier", route_by_tool, ["structured_output_node", "tool_node"]
 )
+agent_builder.add_edge("tool_node", "llm_call")
 agent_builder.add_edge("structured_output_node", END)
-agent_builder.add_edge("tool_node", "llm_call") # need conditional edge
+
 
 
 # Compile agent
@@ -175,19 +176,21 @@ display(Image(agent.get_graph(xray=True).draw_mermaid_png()))
 # Topic for message
 topic = "latest reliable news source affecting stock market"
 
-
-# Invoke with sequential messages instead of sending them all at once
+# # Invoke with sequential messages instead of sending them all at once
 config = {"configurable": {"thread_id": "1"}}
 
-# List for agent invocation input
+# # List for agent invocation input
 agent_invoke_list = [
     {
-        "message_content": f"What is a reliable site for {topic} through TLD as .com? What is the full URL after appending it as search query to Google News URL? Return the final output as a JSON.",
+        "message_content": f"What is a reliable site for {topic} through TLD as .com? What is the full URL after appending it as search query to Google News URL?",
+        "config": config,
+    },
+    {
+        "message_content": f"Generate the final output as a JSON.",
         "config": config,
     },
 ]
 
-#Generate your final response as JSON
 
 def agent_invoke_message(item: list[dict]) -> MessagesState:
     """Invoke agent to execute messages synchronously"""
