@@ -15,7 +15,7 @@ from pydantic import BaseModel, Field
 from langchain_core.output_parsers import PydanticOutputParser
 from langchain_core.prompts import PromptTemplate
 from langgraph.types import Command
-from langgraph.prebuilt import ToolNode
+from langgraph.prebuilt import ToolNode, tools_condition
 
 
 load_dotenv()
@@ -56,41 +56,39 @@ def guess_url(topic: str, sites: list[str]) -> list[str]:
     return full_urls
 
 
+tools = [relevant_site, guess_url]
+
+
+# Agent State
 class MessagesState(TypedDict):
     messages: Annotated[list[AnyMessage], operator.add]
     llm_calls: int
 
 
 class SearchAgent():
-    def __init__(self, model_name: str = "gpt-4o-mini", tools: list = [relevant_site]):
+    def __init__(self, model_name: str = "gpt-4o-mini", tools: list = tools):
         self.llm = ChatOpenAI(model = model_name, temperature=0)
         self.llm_with_tools = self.llm.bind_tools(tools)
         self.system_prompt = """You are an agent - please keep going until the user's query is completely resolved, before ending your turn and yielding back to the user. Only terminate your turn when you are sure that the problem is solved. You MUST plan extensively before each function call, and reflect extensively on the outcomes of the previous function calls. DO NOT do this entire process by making function calls only, as this can impair your ability to solve the problem and think insightfully."""
 
     def run(self, state: MessagesState) -> dict:
-        messages = [SystemMessage(content=self.system_prompt)] + state["messages"]
-        response = self.llm_with_tools.invoke(messages)
-        return {"messages": state["messages"] + [response]}
+        return {"messages": [self.llm_with_tools.invoke(
+            [SystemMessage(content=self.system_prompt)] + state["messages"]
+            )]
+            }
 
-
-def _router(state:MessagesState) -> str:
-    return state.get("next_step", "finish")
-
-def finish_node(state:MessagesState) -> None:
-    pass
-
-tools = [relevant_site, guess_url]
 
 search_agent = SearchAgent()
 builder = StateGraph(MessagesState)
 builder.add_node("search_node", search_agent.run)
 builder.add_node("tools_node", ToolNode(tools=tools))
-# builder.add_node("tools_node", finish_node)
 
 builder.add_edge(START, "search_node")
-builder.add_edge("tools_node", "search_node")
-builder.add_edge("search_node", END)
-# builder.add_edge("finish_node", END)
+builder.add_conditional_edges(
+    "search_node",
+      tools_condition,
+        {"tools":"tools_node", "__end__":"__end__"})
+
 
 checkpointer = MemorySaver()
 app = builder.compile(checkpointer = checkpointer)
@@ -98,7 +96,7 @@ app = builder.compile(checkpointer = checkpointer)
 topic = "latest reliable news source affecting stock market"
 messages = app.invoke(
     {
-        "messages":[HumanMessage(content=f"What is a reliable site for {topic} through TLD as .com?")]
+        "messages":[HumanMessage(content=f"What is a reliable site for {topic} through TLD as .com? What is the full URL after appending it as search query to Google News URL?")]
     },
     {"configurable": {"thread_id": "1"}}
      )
