@@ -3,15 +3,17 @@ from dotenv import load_dotenv
 import os
 from langchain.tools import tool
 from langchain.chat_models import init_chat_model, BaseChatModel
-from langgraph.graph import StateGraph, START
+from langgraph.graph import StateGraph, START, END
 from langgraph.checkpoint.memory import MemorySaver
 from langchain.messages import AnyMessage, SystemMessage, HumanMessage
 from typing_extensions import TypedDict
-from typing import Annotated, Literal
+from typing import Annotated, Literal, Callable
 import operator
 from langchain_community.utilities import GoogleSerperAPIWrapper
 from pydantic import BaseModel, Field
 from langgraph.prebuilt import ToolNode, tools_condition
+from langgraph.types import Command 
+
 
 # Resolve the project root (two levels up from this file)
 ROOT = Path(__file__).resolve().parents[0]
@@ -63,8 +65,8 @@ class MessagesState(TypedDict):
 
 
 class DefaultAgent():
-    def __init__(self, model_name: str, tools: list):
-        self.llm = init_chat_model(model=model_name, temperature=0)
+    def __init__(self, model: str, tools: list):
+        self.llm = init_chat_model(model=model, temperature=0)
         self.llm_with_tools = self.llm.bind_tools(tools=tools)
         self.system_prompt = """You are an agent - please keep going until the user's query is completely resolved, before ending your turn and yielding back to the user. Only terminate your turn when you are sure that the problem is solved. You MUST plan extensively before each function call, and reflect extensively on the outcomes of the previous function calls. DO NOT do this entire process by making function calls only, as this can impair your ability to solve the problem and think insightfully."""
 
@@ -77,27 +79,49 @@ class DefaultAgent():
             ]
         }
     
-def make_supervisor_node(llm: BaseChatModel, members: list[str]) -> str:
+def make_supervisor_node(llm: BaseChatModel, members: list[str]) -> Callable[[MessagesState], Command[str]]:
     options = ["FINISH"] + members
     system_prompt =  (f"You are a supervisor tasked with managing a conversation between the following workers: {members}. Given the following user request, respond with the worker to act next. Each worker will perform a task and respond with their results and status. When finished, respond with FINISH."
     )
 
+
     class Router(TypedDict):
         """Worker to route to next. If no workers needed route to FINISH"""
-        next: list[str]
+        next: list[str] = options
     
-    #TO DO supervisor_node function
+
+    def supervisor_node(state: MessagesState) -> Command[str]:
+        messages = [
+            {"role":"system", "content": system_prompt}
+        ] + state["messages"]
+        response = llm.with_structured_output(Router).invoke(messages)
+        choice = response["next"]
+        goto = END if choice == "FINISH" else choice
+        return Command(goto=goto, update={"next":choice})
+    return supervisor_node 
+
+# TO DO update to return search node agent to supervisor 
+def search_node(state: MessagesState):
+    search_agent = DefaultAgent(model = model, tools=tools)
+    search_agent.run
 
 
-search_agent = DefaultAgent(model_name="openai:gpt-4o-mini", tools=tools)
+model = "openai:gpt-4o-mini"
+search_supervisor_node = make_supervisor_node(
+    init_chat_model(model), ["search_node"])
+
+
 builder = StateGraph(MessagesState)
-builder.add_node("search_node", search_agent.run)
+builder.add_node("search_supervisor_node", search_supervisor_node)
+builder.add_node("search_node", search_node)
 builder.add_node("tools_node", ToolNode(tools=tools))
 
-builder.add_edge(START, "search_node")
+builder.add_edge(START, "search_supervisor_node")
+builder.add_edge("search_supervisor_node", "search_node")
 builder.add_conditional_edges(
-    "search_node", tools_condition, {"tools": "tools_node", "__end__": "__end__"}
+    "search_node", tools_condition, {"tools": "tools_node", END: END}
 )
+# builder.add_edge("tools_node", "search_supervisor_node")
 
 
 checkpointer = MemorySaver()
@@ -116,5 +140,15 @@ messages = app.invoke(
     {"configurable": {"thread_id": "1"}},
 )
 
-for m in messages["messages"]:
-    m.pretty_print()
+# for m in messages["messages"]:
+#     m.pretty_print()
+
+for s in app.stream({
+        "messages": [
+            HumanMessage(
+                content=f"What is a reliable site for {topic} through TLD as .com? What is the full URL after appending it as search query to Google News URL?"
+            )
+        ]
+    },
+    config={"configurable": {"thread_id": "1"}}):
+    print(s)
