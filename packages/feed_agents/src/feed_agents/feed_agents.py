@@ -107,9 +107,10 @@ class DefaultAgent:
 
         self.workflow.add_edge(START, "agent")
         self.workflow.add_conditional_edges(
-            "agent", tools_condition, {"tools": "tools", END: END}
+            "agent", tools_condition, {"tools": "tools", END: "structured_agent"}
         )
-        self.workflow.add_edge("tools", "structured_agent")
+        self.workflow.add_edge("tools", "agent")
+        self.workflow.add_edge("structured_agent", END)
 
     def call_agent(self, state: MessagesState) -> dict:
         return {
@@ -139,13 +140,13 @@ class DefaultAgent:
 def make_supervisor_node(
     llm: BaseChatModel, members: list[str], config: dict
 ) -> Callable[[MessagesState], Command[str]]:
-    options = ["FINISH"] + members
+    options = ",".join(["FINISH"] + members)
     system_prompt = f"You are a supervisor tasked with managing a conversation between the following workers: {members}. Given the following user request, respond with the worker to act next. Each worker will perform a task and respond with their results and status. When finished, respond with FINISH."
 
     class Router(TypedDict):
         """Worker to route to next. If no workers needed route to FINISH"""
 
-        next: list[str] = options
+        next: str = Field(description=f"Next worker to route to. Options: {options}")
 
     def supervisor_node(state: MessagesState) -> Command[str]:
         messages = [{"role": "system", "content": system_prompt}] + state["messages"]
@@ -168,7 +169,10 @@ def search_node(state: MessagesState):
     return Command(
         update={
             "messages": [
-                HumanMessage(content=f"Research completed successfully. Data: {search_agent_last.model_dump_json()}", name="search")
+                HumanMessage(
+                    content=f"Research completed successfully. Data: {search_agent_last.model_dump_json()}",
+                    name="search",
+                )
             ]
         },
         goto="supervisor",
@@ -184,10 +188,11 @@ search_supervisor_node = make_supervisor_node(
 builder = StateGraph(MessagesState)
 builder.add_node("supervisor", search_supervisor_node)
 builder.add_node("search", search_node)
-
+builder.add_node("FINISH", lambda state: state)  # Terminal node
 
 builder.add_edge(START, "supervisor")
 builder.add_edge("search", "supervisor")
+builder.add_edge("FINISH", END)
 
 
 checkpointer = MemorySaver()
