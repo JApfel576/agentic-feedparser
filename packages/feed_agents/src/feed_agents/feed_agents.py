@@ -17,7 +17,7 @@ from langgraph.types import Command
 
 
 # Resolve the project root (two levels up from this file)
-ROOT = Path(__file__).resolve().parents[0]
+ROOT = Path(__file__).resolve().parents[4]
 load_dotenv(ROOT / ".env")
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
@@ -34,6 +34,15 @@ class SiteResponseOutput(BaseModel):
     sites: list[str] = Field(description="Sites suggested")
 
 
+class GuessURLOutput(BaseModel):
+    """Structured output for guess_url tool (full URLs)"""
+
+    topic: str = Field(description="Input topic")
+    sites: list[str] = Field(
+        description="Full URLs prefixed as Google News search queries"
+    )
+
+
 search = GoogleSerperAPIWrapper()
 
 
@@ -42,22 +51,23 @@ def relevant_site(topic: str, sites: list[str]) -> dict:
     """Provide a relevant link for input topic using google serper"""
     results = search.results(k=5, query=topic)
     results = results["organic"]
-    return {"topic": topic, "sites": [item.get("link") for item in results]}
+    sites_out = [item.get("link") for item in results]
+    output = SiteResponseOutput(topic=topic, sites=sites_out)
+    return output.model_dump()
 
 
 @tool(args_schema=SiteResponseOutput)
 def guess_url(topic: str, sites: list[str]) -> dict:
     """Prefix relevant site with google news search query url"""
-    sites = relevant_site.invoke({"topic": topic, "sites": sites})
+    sites_res = relevant_site.invoke({"topic": topic, "sites": sites})
     prefix = "https://news.google.com/search?q="
-    full_urls = {
-        "topic": sites.get("topic"),
-        "sites": [f"{prefix}site:{s}" for s in sites.get("sites")],
-    }
-    return full_urls
+    full_sites = [f"{prefix}site:{s}" for s in sites_res.get("sites", [])]
+    output = GuessURLOutput(topic=sites_res.get("topic", topic), sites=full_sites)
+    return output.model_dump()
 
 
 tools = [relevant_site, guess_url]
+config = {"configurable": {"thread_id": "1"}}
 
 
 # Agent State
@@ -66,16 +76,25 @@ class MessagesState(TypedDict):
 
 
 class DefaultAgent:
-    def __init__(self, state: MessagesState, model: str, tools: list):
+    def __init__(
+        self,
+        state: MessagesState,
+        model: str,
+        tools: list,
+        schema: BaseModel,
+        config: dict,
+    ):
 
         self.state = state
         self.model = model
         self.tools = tools
+        self.schema = schema
+        self.config = config
 
         self.workflow = StateGraph(MessagesState)
         self.setup_graph()
         self.checkpointer = MemorySaver()
-        self.graph = self.workflow.compile(checkpointer=checkpointer)
+        self.graph = self.workflow.compile(checkpointer=self.checkpointer)
 
         self.llm = init_chat_model(model=model, temperature=0)
         self.llm_with_tools = self.llm.bind_tools(tools=tools)
@@ -84,56 +103,41 @@ class DefaultAgent:
     def setup_graph(self):
         self.workflow.add_node("agent", self.call_agent)
         self.workflow.add_node("tools", ToolNode(tools))
+        self.workflow.add_node("structured_agent", self.call_structured_agent)
+
         self.workflow.add_edge(START, "agent")
         self.workflow.add_conditional_edges(
             "agent", tools_condition, {"tools": "tools", END: END}
         )
-        self.workflow.add_edge("tools", "agent")
+        self.workflow.add_edge("tools", "structured_agent")
 
     def call_agent(self, state: MessagesState) -> dict:
         return {
             "messages": [
                 self.llm_with_tools.invoke(
                     [SystemMessage(content=self.system_prompt)] + state["messages"],
-                    config={"configurable": {"thread_id": "1"}},
+                    config=self.config,
                 )
             ]
         }
 
-
-class StructuredAgent(DefaultAgent):
-    def __init__(self, state, model, tools, schema):
-        super().__init__(state=state, model=model, tools=tools)
-        self.workflow = StateGraph(MessagesState)
-        self.setup_graph()
-        self.graph = self.workflow.compile(checkpointer=checkpointer)
-        self.schema = schema
-        self.system_prompt = "You are an agent with expertise in understanding unstructured content. Analyze the content and respond in requested format"
-
-    def setup_graph(self):
-        self.workflow.add_node("agent", self.call_agent)
-        self.workflow.add_node("tools", ToolNode(tools))
-        self.workflow.add_edge(START, "agent")
-        self.workflow.add_conditional_edges(
-            "agent", tools_condition, {"tools": "tools", END: END}
-        )
-        # self.workflow.add_edge("tools", "agent")
-
     def call_structured_agent(self, state: MessagesState) -> dict:
+        messages = state["messages"]
+        last_message = messages[-1]
         return {
             "messages": [
                 self.llm.with_structured_output(
-                    self.schema, tools=tools, strict=True, include_raw=False
+                    self.schema, strict=True, include_raw=False
                 ).invoke(
-                    [SystemMessage(content=self.system_prompt)] + state["messages"],
-                    config={"configurable": {"thread_id": "1"}},
+                    last_message.content,
+                    config=self.config,
                 )
             ]
         }
 
 
 def make_supervisor_node(
-    llm: BaseChatModel, members: list[str]
+    llm: BaseChatModel, members: list[str], config: dict
 ) -> Callable[[MessagesState], Command[str]]:
     options = ["FINISH"] + members
     system_prompt = f"You are a supervisor tasked with managing a conversation between the following workers: {members}. Given the following user request, respond with the worker to act next. Each worker will perform a task and respond with their results and status. When finished, respond with FINISH."
@@ -145,9 +149,7 @@ def make_supervisor_node(
 
     def supervisor_node(state: MessagesState) -> Command[str]:
         messages = [{"role": "system", "content": system_prompt}] + state["messages"]
-        response = llm.with_structured_output(Router).invoke(
-            messages, config={"configurable": {"thread_id": "1"}}
-        )
+        response = llm.with_structured_output(Router).invoke(messages, config=config)
         choice = response["next"]
         if choice == "FINISH":
             goto = END
@@ -159,28 +161,14 @@ def make_supervisor_node(
 
 
 def search_node(state: MessagesState):
-    search_agent = DefaultAgent(state=state, model=model, tools=tools).graph.invoke(
-        state
-    )
-    search_agent_content = search_agent["messages"][-1].content
-    return Command(
-        update={
-            "messages": [HumanMessage(content=search_agent_content, name="search")]
-        },
-        goto="supervisor",
-    )
-
-
-def search_structured_node(state: MessagesState):
-    search_agent = StructuredAgent(
-        state=state, model=model, tools=tools, schema=SiteResponseOutput
+    search_agent = DefaultAgent(
+        state=state, model=model, tools=tools, schema=GuessURLOutput, config=config
     ).graph.invoke(state)
-    search_agent_content = search_agent["messages"][-1].content
-    print(search_agent_content)
+    search_agent_last = search_agent["messages"][-1]
     return Command(
         update={
             "messages": [
-                HumanMessage(content=search_agent_content, name="search_structured")
+                HumanMessage(content=search_agent_last.model_dump_json(), name="search")
             ]
         },
         goto="supervisor",
@@ -189,23 +177,23 @@ def search_structured_node(state: MessagesState):
 
 model = "openai:gpt-4o-mini"
 search_supervisor_node = make_supervisor_node(
-    init_chat_model(model), ["search", "search_structured"]
+    init_chat_model(model), ["search"], config=config
 )
 
 
 builder = StateGraph(MessagesState)
 builder.add_node("supervisor", search_supervisor_node)
 builder.add_node("search", search_node)
-builder.add_node("search_structured", search_structured_node)
+
 
 builder.add_edge(START, "supervisor")
 builder.add_edge("search", "supervisor")
-builder.add_edge("search_structured", "supervisor")
+
 
 checkpointer = MemorySaver()
 app = builder.compile(checkpointer=checkpointer)
 
-# Topic for message
+
 topic = "latest reliable news source affecting stock market"
 messages = app.invoke(
     {
@@ -215,7 +203,7 @@ messages = app.invoke(
             )
         ]
     },
-    {"configurable": {"thread_id": "1"}},
+    config=config,
 )
 
 for m in messages["messages"]:
