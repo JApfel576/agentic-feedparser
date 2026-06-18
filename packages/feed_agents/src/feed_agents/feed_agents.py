@@ -168,7 +168,7 @@ def search_node(state: MessagesState):
     return Command(
         update={
             "messages": [
-                HumanMessage(content=search_agent_last.model_dump_json(), name="search")
+                HumanMessage(content=f"Research completed successfully. Data: {search_agent_last.model_dump_json()}", name="search")
             ]
         },
         goto="supervisor",
