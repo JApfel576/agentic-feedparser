@@ -1,17 +1,18 @@
 from pathlib import Path
+from urllib import response
 from dotenv import load_dotenv
 import os
 from langchain.tools import tool
 from langchain.chat_models import init_chat_model, BaseChatModel
 from langgraph.graph import StateGraph, START, END
 from langgraph.checkpoint.memory import MemorySaver
-from langchain.messages import AnyMessage, SystemMessage, HumanMessage
+from langchain.messages import AnyMessage, SystemMessage, HumanMessage, AIMessage
 from typing_extensions import TypedDict
-from typing import Annotated
+from typing import Annotated, Literal
 from collections.abc import Callable
 import operator
 from langchain_community.utilities import GoogleSerperAPIWrapper
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, HttpUrl
 from langgraph.prebuilt import ToolNode, tools_condition
 from langgraph.types import Command
 
@@ -42,6 +43,14 @@ class GuessURLOutput(BaseModel):
         description="Full URLs prefixed as Google News search queries"
     )
 
+class APIHealthUrl(BaseModel):
+    """Structured output for API health check"""
+    url: str = Field(description="URL to check API health")
+    status: str = Field(
+        description="Status of the API health check"
+    )
+    message: str = Field(description="Message providing details about the health check")
+
 
 search = GoogleSerperAPIWrapper()
 
@@ -65,9 +74,24 @@ def guess_url(topic: str, sites: list[str]) -> dict:
     output = GuessURLOutput(topic=sites_res.get("topic", topic), sites=full_sites)
     return output.model_dump()
 
+@tool(args_schema=APIHealthUrl)
+def check_api_health(url: str, status: str, message: str) -> dict:
+    """Check health of API by making a request and returning status"""
+    import requests
+    try:
+        response = requests.get(url)
+        
+        if response.status_code == 200:
+            return APIHealthUrl(url=url, status=response.text, message="API is healthy").model_dump()
+        else:
+            return APIHealthUrl(url=url, status=response.text, message=f"API returned status code {response.status_code}").model_dump()
+    except Exception as e:
+        return APIHealthUrl(url=url, status=response.text, message=str(e)).model_dump()
 
-tools = [relevant_site, guess_url]
+
+tools = [relevant_site, guess_url, check_api_health]
 config = {"configurable": {"thread_id": "1"}}
+api_health_url = "http://127.0.0.1:8000/health"
 
 
 # Agent State
@@ -141,16 +165,19 @@ def make_supervisor_node(
     llm: BaseChatModel, members: list[str], config: dict
 ) -> Callable[[MessagesState], Command[str]]:
     options = ",".join(["FINISH"] + members)
-    system_prompt = f"You are a supervisor tasked with managing a conversation between the following workers: {members}. Given the following user request, respond with the worker to act next. Each worker will perform a task and respond with their results and status. When finished, respond with FINISH."
+    system_prompt = f"You are a supervisor tasked with managing a conversation between the following workers: {options}. Given the following user request, respond with the worker to act next. Each worker will perform a task and respond with their results and status. When finished, respond with FINISH."
 
+    
     class Router(TypedDict):
         """Worker to route to next. If no workers needed route to FINISH"""
 
         next: str = Field(description=f"Next worker to route to. Options: {options}")
 
+
     def supervisor_node(state: MessagesState) -> Command[str]:
         messages = [{"role": "system", "content": system_prompt}] + state["messages"]
         response = llm.with_structured_output(Router).invoke(messages, config=config)
+        # print(f"Supervisor response: {response}")
         choice = response["next"]
         if choice == "FINISH":
             goto = END
@@ -178,20 +205,39 @@ def search_node(state: MessagesState):
         goto="supervisor",
     )
 
+def api_node(state: MessagesState):
+    api_agent = DefaultAgent(
+        state=state, model=model, tools=tools, schema=APIHealthUrl, config={"configurable": {"thread_id": "2"}}
+    ).graph.invoke(state)
+    api_agent_last = api_agent["messages"][-1]
+    return Command(
+        update={
+            "messages": [
+                HumanMessage(
+                    content=f"API call completed successfully. Data: {api_agent_last.model_dump_json()}",
+                    name="api",
+                )
+            ]
+        },
+        goto="supervisor",
+    )
+
 
 model = "openai:gpt-4o-mini"
 search_supervisor_node = make_supervisor_node(
-    init_chat_model(model), ["search"], config=config
+    init_chat_model(model), ["search", "api"], config=config
 )
 
 
 builder = StateGraph(MessagesState)
 builder.add_node("supervisor", search_supervisor_node)
 builder.add_node("search", search_node)
+builder.add_node("api", api_node)
 builder.add_node("FINISH", lambda state: state)  # Terminal node
 
 builder.add_edge(START, "supervisor")
 builder.add_edge("search", "supervisor")
+builder.add_edge("api", "supervisor")
 builder.add_edge("FINISH", END)
 
 
@@ -200,16 +246,26 @@ app = builder.compile(checkpointer=checkpointer)
 
 
 topic = "latest reliable news source affecting stock market"
-messages = app.invoke(
-    {
+# messages = app.invoke(
+#     {
+#         "messages": [
+#             HumanMessage(
+#                 content=f"What is a reliable site for {topic} through TLD as .com? What is the full URL after appending it as search query to Google News URL?"
+#             )
+#         ]
+#     },
+#     config=config,
+# )
+
+# for m in messages["messages"]:
+#     m.pretty_print()
+
+for s in app.stream({
         "messages": [
             HumanMessage(
                 content=f"What is a reliable site for {topic} through TLD as .com? What is the full URL after appending it as search query to Google News URL?"
             )
         ]
-    },
-    config=config,
-)
-
-for m in messages["messages"]:
-    m.pretty_print()
+    }, config=config):
+    print(s)
+    print("---")
