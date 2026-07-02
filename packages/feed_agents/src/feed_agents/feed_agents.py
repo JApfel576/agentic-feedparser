@@ -45,18 +45,18 @@ class GuessURLOutput(BaseModel):
         description="Full URLs prefixed as Google News search queries"
     )
 
-class APIHealthUrl(BaseModel):
-    """Structured output for API health check"""
-    url: str = Field(description="URL to check API health")
+class APIHealthEndpoint(BaseModel):
+    """Structured output for API health endpoint check"""
+    endpoint: str = Field(description="Endpoint for checking API health")
     status: str = Field(
-        description="Status of the API health check"
+        description="Status of the API health endpoint"
     )
-    message: str = Field(description="Message providing details about the health check")
+    message: str = Field(description="Message providing details from the endpoint about API health")
 
 
 search = GoogleSerperAPIWrapper()
 
-api_health_url = "http://127.0.0.1:8000/health"
+api_health_endpoint = "http://127.0.0.1:8000/health"
 
 @tool(args_schema=SiteResponseOutput)
 def relevant_site(topic: str, sites: list[str]) -> dict:
@@ -77,19 +77,19 @@ def guess_url(topic: str, sites: list[str]) -> dict:
     output = GuessURLOutput(topic=sites_res.get("topic", topic), sites=full_sites)
     return output.model_dump()
 
-@tool(args_schema=APIHealthUrl)
-def check_api_health(url: str, status: str, message: str) -> dict:
-    """Check health of API by making a request to input parameter url and returning status"""
-    url = "http://localhost:8000/health"
+@tool(args_schema=APIHealthEndpoint)
+def check_api_health(endpoint: str, status: str, message: str) -> dict:
+    """Check health of API by making a GET request to input parameter value and returning status"""
+    endpoint = api_health_endpoint
     try:
-        response = requests.get(url)
-        
+        response = requests.get(endpoint, timeout=5)
+
         if response.status_code == 200:
-            return APIHealthUrl(url=url, status="OK", message="API is healthy").model_dump()
+            return APIHealthEndpoint(endpoint=endpoint, status="OK", message="API is healthy").model_dump()
         else:
-            return APIHealthUrl(url=url, status="NOT OK", message=f"API returned status code {response.status_code}").model_dump()
+            return APIHealthEndpoint(endpoint=endpoint, status="NOT OK", message=f"API returned status code {response.status_code}").model_dump()
     except Exception as e:
-        return APIHealthUrl(url=url, status="ERROR", message=str(e)).model_dump()
+        return APIHealthEndpoint(endpoint=endpoint, status="ERROR", message=str(e)).model_dump()
 
 
 #tools = [relevant_site, guess_url, check_api_health]
@@ -107,9 +107,10 @@ class DefaultAgent:
         state: MessagesState,
         model: str,
         tools: list,
-        tool_choice: list,
+        tool_choice: list | None,
         schema: BaseModel,
         config: dict,
+        system_prompt: str | None =  """You are an agent - please keep going until the user's query is completely resolved, before ending your turn and yielding back to the user. Only terminate your turn when you are sure that the problem is solved. You MUST plan extensively before each function call, and reflect extensively on the outcomes of the previous function calls. DO NOT do this entire process by making function calls only, as this can impair your ability to solve the problem and think insightfully."""
     ):
 
         self.state = state
@@ -118,6 +119,7 @@ class DefaultAgent:
         self.tool_choice = tool_choice
         self.schema = schema
         self.config = config
+        self.system_prompt = system_prompt
 
         self.workflow = StateGraph(MessagesState)
         self.setup_graph()
@@ -126,7 +128,7 @@ class DefaultAgent:
 
         self.llm = init_chat_model(model=self.model, temperature=0)
         self.llm_with_tools = self.llm.bind_tools(tools=self.tools, tool_choice=self.tool_choice)
-        self.system_prompt = """If the user mentions making an api call, you should use the check_api_health tool only to make the api call and return the status and message. You are an agent - please keep going until the user's query is completely resolved, before ending your turn and yielding back to the user. Only terminate your turn when you are sure that the problem is solved. You MUST plan extensively before each function call, and reflect extensively on the outcomes of the previous function calls. DO NOT do this entire process by making function calls only, as this can impair your ability to solve the problem and think insightfully."""
+
 
     def setup_graph(self):
         self.workflow.add_node("agent", self.call_agent)
@@ -181,7 +183,6 @@ def make_supervisor_node(
     def supervisor_node(state: MessagesState) -> Command[str]:
         messages = [{"role": "system", "content": system_prompt}] + state["messages"]
         response = llm.with_structured_output(Router).invoke(messages, config=config)
-        # print(f"Supervisor response: {response}")
         choice = response["next"]
         if choice == "FINISH":
             goto = END
@@ -194,9 +195,9 @@ def make_supervisor_node(
 
 def search_node(state: MessagesState):
     tools = [relevant_site, guess_url]
-    tool_choice = ["relevant_site", "guess_url"]
+    #tool_choice = ["relevant_site", "guess_url"]
     search_agent = DefaultAgent(
-        state=state, model=model, tools=tools, tool_choice=tool_choice, schema=GuessURLOutput, config=config
+        state=state, model=model, tools=tools, tool_choice=None, schema=GuessURLOutput, config=config
     ).graph.invoke(state)
     search_agent_last = search_agent["messages"][-1]
     return Command(
@@ -211,18 +212,19 @@ def search_node(state: MessagesState):
         goto="supervisor",
     )
 
-def api_node(state: MessagesState):
+def api_request_node(state: MessagesState):
     tools = [check_api_health]
-    tool_choice = ("check_api_health")
+    # tool_choice = ("check_api_health")
+    system_prompt = """You are an agent tasked with checking the health of an API. Use the check_api_health tool to make a GET request to the API health endpoint and return the status and message. Ensure that you handle any errors gracefully and provide a clear response."""
     api_agent = DefaultAgent(
-        state=state, model=model, tools=tools, tool_choice=tool_choice, schema=APIHealthUrl, config=config
-    ).graph.ainvoke(state, config=config)
+        state=state, model=model, tools=tools, tool_choice=None, schema=APIHealthEndpoint, config=config, system_prompt=system_prompt
+    ).graph.invoke(state, config={"configurable": {"thread_id": "2"}})
     api_agent_last = api_agent["messages"][-1]
     return Command(
         update={
             "messages": [
                 HumanMessage(
-                    content=f"API call completed successfully. Data: {api_agent_last.model_dump_json()}",
+                    content=f"API request completed successfully. Data: {api_agent_last.model_dump_json()}",
                     name="api",
                 )
             ]
@@ -241,7 +243,7 @@ def main():
     builder = StateGraph(MessagesState)
     builder.add_node("supervisor", search_supervisor_node)
     builder.add_node("search", search_node)
-    builder.add_node("api", api_node)
+    builder.add_node("api", api_request_node)
     builder.add_node("FINISH", lambda state: state)  # Terminal node
 
     builder.add_edge(START, "supervisor")
@@ -259,25 +261,25 @@ def main():
         {
             "messages": [
                 HumanMessage(
-                    content=f"Make an API call to check the health of the URL and return the status and message."
+                    content=f"Make a GET request to check the health of the API and return the status and message."
                     )
             ]
         },
         config=config,
     )
 
-    # for m in messages["messages"]:
-    #     m.pretty_print()
+    for m in messages["messages"]:
+        m.pretty_print()
 
-    for s in app.stream({
-            "messages": [
-                HumanMessage(
-                    content=f"Make an API call using check_api_health tool to check the health of the URL and return the status and message."
-                )
-            ]
-        }, config=config):
-        print(s)
-        print("---")
+    # for s in app.stream({
+    #         "messages": [
+    #             HumanMessage(
+    #                 content=f"Make a GET request using check_api_health tool to check the health of the API and return the status and message."
+    #             )
+    #         ]
+    #     }, config=config):
+    #     print(s)
+    #     print("---")
 
 main()
 
