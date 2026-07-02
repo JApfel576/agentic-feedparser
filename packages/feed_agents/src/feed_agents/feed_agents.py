@@ -1,22 +1,21 @@
+from enum import Enum
 from pathlib import Path
-from urllib import response
 from dotenv import load_dotenv
 import os
 from langchain.tools import tool
 from langchain.chat_models import init_chat_model, BaseChatModel
 from langgraph.graph import StateGraph, START, END
 from langgraph.checkpoint.memory import MemorySaver
-from langchain.messages import AnyMessage, SystemMessage, HumanMessage, AIMessage
+from langchain.messages import AnyMessage, SystemMessage, HumanMessage
 from typing_extensions import TypedDict
-from typing import Annotated, Literal
+from typing import Annotated
 from collections.abc import Callable
 import operator
 from langchain_community.utilities import GoogleSerperAPIWrapper
-from pydantic import BaseModel, Field, HttpUrl
+from pydantic import BaseModel, Field
 from langgraph.prebuilt import ToolNode, tools_condition
 from langgraph.types import Command
 import requests
-import asyncio
 
 # Resolve the project root (two levels up from this file)
 ROOT = Path(__file__).resolve().parents[4]
@@ -25,10 +24,6 @@ load_dotenv(ROOT / ".env")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 SERPER_API_KEY = os.getenv("SERPER_API_KEY")
 
-
-# SYSTEM_PROMPT = """You are an agent - please keep going until the user's query is completely resolved, before ending your turn and yielding back to the user. Only terminate your turn when you are sure that the problem is solved. You MUST plan extensively before each function call, and reflect extensively on the outcomes of the previous function calls. DO NOT do this entire process by making function calls only, as this can impair your ability to solve the problem and think insightfully."""
-
-# If the user mentions searching for a site, you should use the guess_url tool to search for a site and return the full URL after appending it as a search query to Google News URL.
 
 class SiteResponseOutput(BaseModel):
     """Structure an output for sites suggested by LLM for input topic"""
@@ -45,18 +40,27 @@ class GuessURLOutput(BaseModel):
         description="Full URLs prefixed as Google News search queries"
     )
 
+
+class Endpoint(str, Enum):
+    """Class to hold API endpoint information"""
+    health = "/health"
+    poll = "/poll"
+
+
 class APIHealthEndpoint(BaseModel):
     """Structured output for API health endpoint check"""
     endpoint: str = Field(description="Endpoint for checking API health")
-    status: str = Field(
-        description="Status of the API health endpoint"
+    status: str = Field(description="Status of the API health endpoint")
+    message: str = Field(
+        description="Message providing details from the endpoint about API health"
     )
-    message: str = Field(description="Message providing details from the endpoint about API health")
-
 
 search = GoogleSerperAPIWrapper()
+api_host = "http://127.0.0.1:8000"
 
-api_health_endpoint = "http://127.0.0.1:8000/health"
+def build_api_url(endpoint: Endpoint) -> str:
+    return f"{api_host}{endpoint.value}"
+
 
 @tool(args_schema=SiteResponseOutput)
 def relevant_site(topic: str, sites: list[str]) -> dict:
@@ -77,22 +81,30 @@ def guess_url(topic: str, sites: list[str]) -> dict:
     output = GuessURLOutput(topic=sites_res.get("topic", topic), sites=full_sites)
     return output.model_dump()
 
+
 @tool(args_schema=APIHealthEndpoint)
 def check_api_health(endpoint: str, status: str, message: str) -> dict:
     """Check health of API by making a GET request to input parameter value and returning status"""
-    endpoint = api_health_endpoint
+    endpoint = build_api_url(Endpoint.health)
     try:
         response = requests.get(endpoint, timeout=5)
 
         if response.status_code == 200:
-            return APIHealthEndpoint(endpoint=endpoint, status="OK", message="API is healthy").model_dump()
+            return APIHealthEndpoint(
+                endpoint=endpoint, status="OK", message="API is healthy"
+            ).model_dump()
         else:
-            return APIHealthEndpoint(endpoint=endpoint, status="NOT OK", message=f"API returned status code {response.status_code}").model_dump()
+            return APIHealthEndpoint(
+                endpoint=endpoint,
+                status="NOT OK",
+                message=f"API returned status code {response.status_code}",
+            ).model_dump()
     except Exception as e:
-        return APIHealthEndpoint(endpoint=endpoint, status="ERROR", message=str(e)).model_dump()
+        return APIHealthEndpoint(
+            endpoint=endpoint, status="ERROR", message=str(e)
+        ).model_dump()
 
 
-#tools = [relevant_site, guess_url, check_api_health]
 config = {"configurable": {"thread_id": "1"}}
 
 
@@ -110,7 +122,8 @@ class DefaultAgent:
         tool_choice: list | None,
         schema: BaseModel,
         config: dict,
-        system_prompt: str | None =  """You are an agent - please keep going until the user's query is completely resolved, before ending your turn and yielding back to the user. Only terminate your turn when you are sure that the problem is solved. You MUST plan extensively before each function call, and reflect extensively on the outcomes of the previous function calls. DO NOT do this entire process by making function calls only, as this can impair your ability to solve the problem and think insightfully."""
+        system_prompt: str
+        | None = """You are an agent - please keep going until the user's query is completely resolved, before ending your turn and yielding back to the user. Only terminate your turn when you are sure that the problem is solved. You MUST plan extensively before each function call, and reflect extensively on the outcomes of the previous function calls. DO NOT do this entire process by making function calls only, as this can impair your ability to solve the problem and think insightfully.""",
     ):
 
         self.state = state
@@ -127,8 +140,9 @@ class DefaultAgent:
         self.graph = self.workflow.compile(checkpointer=self.checkpointer)
 
         self.llm = init_chat_model(model=self.model, temperature=0)
-        self.llm_with_tools = self.llm.bind_tools(tools=self.tools, tool_choice=self.tool_choice)
-
+        self.llm_with_tools = self.llm.bind_tools(
+            tools=self.tools, tool_choice=self.tool_choice
+        )
 
     def setup_graph(self):
         self.workflow.add_node("agent", self.call_agent)
@@ -173,12 +187,10 @@ def make_supervisor_node(
     options = ",".join(["FINISH"] + members)
     system_prompt = f"You are a supervisor tasked with managing a conversation between the following workers: {options}. Given the following user request, respond with the worker to act next. Each worker will perform a task and respond with their results and status. When finished, respond with FINISH."
 
-    
     class Router(TypedDict):
         """Worker to route to next. If no workers needed route to FINISH"""
 
         next: str = Field(description=f"Next worker to route to. Options: {options}")
-
 
     def supervisor_node(state: MessagesState) -> Command[str]:
         messages = [{"role": "system", "content": system_prompt}] + state["messages"]
@@ -195,9 +207,13 @@ def make_supervisor_node(
 
 def search_node(state: MessagesState):
     tools = [relevant_site, guess_url]
-    #tool_choice = ["relevant_site", "guess_url"]
     search_agent = DefaultAgent(
-        state=state, model=model, tools=tools, tool_choice=None, schema=GuessURLOutput, config=config
+        state=state,
+        model=model,
+        tools=tools,
+        tool_choice=None,
+        schema=GuessURLOutput,
+        config=config,
     ).graph.invoke(state)
     search_agent_last = search_agent["messages"][-1]
     return Command(
@@ -212,12 +228,18 @@ def search_node(state: MessagesState):
         goto="supervisor",
     )
 
+
 def api_request_node(state: MessagesState):
     tools = [check_api_health]
-    # tool_choice = ("check_api_health")
     system_prompt = """You are an agent tasked with checking the health of an API. Use the check_api_health tool to make a GET request to the API health endpoint and return the status and message. Ensure that you handle any errors gracefully and provide a clear response."""
     api_agent = DefaultAgent(
-        state=state, model=model, tools=tools, tool_choice=None, schema=APIHealthEndpoint, config=config, system_prompt=system_prompt
+        state=state,
+        model=model,
+        tools=tools,
+        tool_choice=None,
+        schema=APIHealthEndpoint,
+        config=config,
+        system_prompt=system_prompt,
     ).graph.invoke(state, config={"configurable": {"thread_id": "2"}})
     api_agent_last = api_agent["messages"][-1]
     return Command(
@@ -232,13 +254,14 @@ def api_request_node(state: MessagesState):
         goto="supervisor",
     )
 
+
 model = "openai:gpt-4o-mini"
+
 
 def main():
     search_supervisor_node = make_supervisor_node(
         init_chat_model(model), ["search", "api"], config=config
     )
-
 
     builder = StateGraph(MessagesState)
     builder.add_node("supervisor", search_supervisor_node)
@@ -251,10 +274,8 @@ def main():
     builder.add_edge("api", "supervisor")
     builder.add_edge("FINISH", END)
 
-
     checkpointer = MemorySaver()
     app = builder.compile(checkpointer=checkpointer)
-
 
     topic = "latest reliable news source affecting stock market"
     messages = app.invoke(
@@ -262,7 +283,7 @@ def main():
             "messages": [
                 HumanMessage(
                     content=f"Make a GET request to check the health of the API and return the status and message."
-                    )
+                )
             ]
         },
         config=config,
@@ -281,6 +302,7 @@ def main():
     #     print(s)
     #     print("---")
 
+
 main()
 
-# What is a reliable site for {topic} through TLD as .com? What is the full URL after appending it as search query to Google News URL?
+# If it is healthy, then search for a reliable site for {topic} through TLD as .com and return the full URL after appending it as a search query to Google News URL. If it is not healthy, return the status and message from the API health check.
