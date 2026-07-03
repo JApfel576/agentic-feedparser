@@ -3,19 +3,15 @@ from pathlib import Path
 from dotenv import load_dotenv
 import os
 from langchain.tools import tool
-from langchain.chat_models import init_chat_model, BaseChatModel
+from langchain.chat_models import init_chat_model
 from langgraph.graph import StateGraph, START, END
 from langgraph.checkpoint.memory import MemorySaver
-from langchain.messages import AnyMessage, SystemMessage, HumanMessage
-from typing_extensions import TypedDict
-from typing import Annotated
-from collections.abc import Callable
-import operator
+from langchain.messages import HumanMessage
 from langchain_community.utilities import GoogleSerperAPIWrapper
 from pydantic import BaseModel, Field
-from langgraph.prebuilt import ToolNode, tools_condition
 from langgraph.types import Command
 import requests
+from base_agents import DefaultAgent, make_supervisor_node, MessagesState
 
 # Resolve the project root (two levels up from this file)
 ROOT = Path(__file__).resolve().parents[4]
@@ -43,20 +39,24 @@ class GuessURLOutput(BaseModel):
 
 class Endpoint(str, Enum):
     """Class to hold API endpoint information"""
+
     health = "/health"
     poll = "/poll"
 
 
 class APIHealthEndpoint(BaseModel):
     """Structured output for API health endpoint check"""
+
     endpoint: str = Field(description="Endpoint for checking API health")
     status: str = Field(description="Status of the API health endpoint")
     message: str = Field(
         description="Message providing details from the endpoint about API health"
     )
 
+
 search = GoogleSerperAPIWrapper()
 api_host = "http://127.0.0.1:8000"
+
 
 def build_api_url(endpoint: Endpoint) -> str:
     return f"{api_host}{endpoint.value}"
@@ -103,106 +103,6 @@ def check_api_health(endpoint: str, status: str, message: str) -> dict:
         return APIHealthEndpoint(
             endpoint=endpoint, status="ERROR", message=str(e)
         ).model_dump()
-
-
-config = {"configurable": {"thread_id": "1"}}
-
-
-# Agent State
-class MessagesState(TypedDict):
-    messages: Annotated[list[AnyMessage], operator.add]
-
-
-class DefaultAgent:
-    def __init__(
-        self,
-        state: MessagesState,
-        model: str,
-        tools: list,
-        tool_choice: list | None,
-        schema: BaseModel,
-        config: dict,
-        system_prompt: str
-        | None = """You are an agent - please keep going until the user's query is completely resolved, before ending your turn and yielding back to the user. Only terminate your turn when you are sure that the problem is solved. You MUST plan extensively before each function call, and reflect extensively on the outcomes of the previous function calls. DO NOT do this entire process by making function calls only, as this can impair your ability to solve the problem and think insightfully.""",
-    ):
-
-        self.state = state
-        self.model = model
-        self.tools = tools
-        self.tool_choice = tool_choice
-        self.schema = schema
-        self.config = config
-        self.system_prompt = system_prompt
-
-        self.workflow = StateGraph(MessagesState)
-        self.setup_graph()
-        self.checkpointer = MemorySaver()
-        self.graph = self.workflow.compile(checkpointer=self.checkpointer)
-
-        self.llm = init_chat_model(model=self.model, temperature=0)
-        self.llm_with_tools = self.llm.bind_tools(
-            tools=self.tools, tool_choice=self.tool_choice
-        )
-
-    def setup_graph(self):
-        self.workflow.add_node("agent", self.call_agent)
-        self.workflow.add_node("tools", ToolNode(self.tools))
-        self.workflow.add_node("structured_agent", self.call_structured_agent)
-
-        self.workflow.add_edge(START, "agent")
-        self.workflow.add_conditional_edges(
-            "agent", tools_condition, {"tools": "tools", END: "structured_agent"}
-        )
-        self.workflow.add_edge("tools", "agent")
-        self.workflow.add_edge("structured_agent", END)
-
-    def call_agent(self, state: MessagesState) -> dict:
-        return {
-            "messages": [
-                self.llm_with_tools.invoke(
-                    [SystemMessage(content=self.system_prompt)] + state["messages"],
-                    config=self.config,
-                )
-            ]
-        }
-
-    def call_structured_agent(self, state: MessagesState) -> dict:
-        messages = state["messages"]
-        last_message = messages[-1]
-        return {
-            "messages": [
-                self.llm.with_structured_output(
-                    self.schema, strict=True, include_raw=False
-                ).invoke(
-                    last_message.content,
-                    config=self.config,
-                )
-            ]
-        }
-
-
-def make_supervisor_node(
-    llm: BaseChatModel, members: list[str], config: dict
-) -> Callable[[MessagesState], Command[str]]:
-    options = ",".join(["FINISH"] + members)
-    system_prompt = f"You are a supervisor tasked with managing a conversation between the following workers: {options}. Given the following user request, respond with the worker to act next. Each worker will perform a task and respond with their results and status. When finished, respond with FINISH."
-
-    class Router(TypedDict):
-        """Worker to route to next. If no workers needed route to FINISH"""
-
-        next: str = Field(description=f"Next worker to route to. Options: {options}")
-
-    def supervisor_node(state: MessagesState) -> Command[str]:
-        messages = [{"role": "system", "content": system_prompt}] + state["messages"]
-        response = llm.with_structured_output(Router).invoke(messages, config=config)
-        choice = response["next"]
-        if choice == "FINISH":
-            goto = END
-        else:
-            goto = choice
-        return Command(goto=goto, update={"next": choice})
-
-    return supervisor_node
 
 
 def search_node(state: MessagesState):
@@ -255,6 +155,7 @@ def api_request_node(state: MessagesState):
     )
 
 
+config = {"configurable": {"thread_id": "1"}}
 model = "openai:gpt-4o-mini"
 
 
@@ -282,7 +183,7 @@ def main():
         {
             "messages": [
                 HumanMessage(
-                    content=f"Make a GET request to check the health of the API and return the status and message."
+                    content="Make a GET request to check the health of the API and return the status and message."
                 )
             ]
         },

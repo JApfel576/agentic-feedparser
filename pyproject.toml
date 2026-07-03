@@ -6,6 +6,7 @@ dependencies = [
     "annotated-types==0.7.0",
     "anyio==4.13.0",
     "argcomplete==3.6.3",
+    "base_agents",
     "black==26.3.1",
     "certifi==2026.2.25",
     "charset-normalizer==3.4.6",
@@ -80,10 +81,12 @@ members = [
     "packages/feedpoller",
     "services/fastapi_app",
     "packages/feed_agents",
+    "packages/base_agents",
 ]
 
 [tool.uv.sources]
 feedpoller = { workspace = true }
+base-agents = { workspace = true }
 
 [dependency-groups]
 dev = [
