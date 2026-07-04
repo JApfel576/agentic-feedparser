@@ -22,17 +22,14 @@ class DefaultAgent:
         state: MessagesState,
         model: str,
         tools: list,
-        tool_choice: list | None,
         schema: BaseModel,
         config: dict,
         system_prompt: str
         | None = """You are an agent - please keep going until the user's query is completely resolved, before ending your turn and yielding back to the user. Only terminate your turn when you are sure that the problem is solved. You MUST plan extensively before each function call, and reflect extensively on the outcomes of the previous function calls. DO NOT do this entire process by making function calls only, as this can impair your ability to solve the problem and think insightfully.""",
     ):
-
         self.state = state
         self.model = model
         self.tools = tools
-        self.tool_choice = tool_choice
         self.schema = schema
         self.config = config
         self.system_prompt = system_prompt
@@ -44,7 +41,7 @@ class DefaultAgent:
 
         self.llm = init_chat_model(model=self.model, temperature=0)
         self.llm_with_tools = self.llm.bind_tools(
-            tools=self.tools, tool_choice=self.tool_choice
+            tools=self.tools
         )
 
     def setup_graph(self):

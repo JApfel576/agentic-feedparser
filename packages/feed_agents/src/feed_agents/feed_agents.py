@@ -2,6 +2,7 @@ from enum import Enum
 from pathlib import Path
 from dotenv import load_dotenv
 import os
+from langchain import messages
 from langchain.tools import tool
 from langchain.chat_models import init_chat_model
 from langgraph.graph import StateGraph, START, END
@@ -105,80 +106,51 @@ def check_api_health(endpoint: str, status: str, message: str) -> dict:
         ).model_dump()
 
 
-def search_node(state: MessagesState):
-    tools = [relevant_site, guess_url]
-    search_agent = DefaultAgent(
-        state=state,
-        model=model,
-        tools=tools,
-        tool_choice=None,
-        schema=GuessURLOutput,
-        config=config,
-    ).graph.invoke(state)
-    search_agent_last = search_agent["messages"][-1]
-    return Command(
-        update={
-            "messages": [
-                HumanMessage(
-                    content=f"Research completed successfully. Data: {search_agent_last.model_dump_json()}",
-                    name="search",
-                )
-            ]
-        },
-        goto="supervisor",
-    )
+def request_team_node(state: MessagesState):
+    model = "openai:gpt-4o-mini"
 
-
-def api_request_node(state: MessagesState):
-    tools = [check_api_health]
-    system_prompt = """You are an agent tasked with checking the health of an API. Use the check_api_health tool to make a GET request to the API health endpoint and return the status and message. Ensure that you handle any errors gracefully and provide a clear response."""
-    api_agent = DefaultAgent(
-        state=state,
-        model=model,
-        tools=tools,
-        tool_choice=None,
-        schema=APIHealthEndpoint,
-        config=config,
-        system_prompt=system_prompt,
-    ).graph.invoke(state, config={"configurable": {"thread_id": "2"}})
-    api_agent_last = api_agent["messages"][-1]
-    return Command(
-        update={
-            "messages": [
-                HumanMessage(
-                    content=f"API request completed successfully. Data: {api_agent_last.model_dump_json()}",
-                    name="api",
-                )
-            ]
-        },
-        goto="supervisor",
-    )
-
-
-config = {"configurable": {"thread_id": "1"}}
-model = "openai:gpt-4o-mini"
-
-
-def main():
-    search_supervisor_node = make_supervisor_node(
-        init_chat_model(model), ["search", "api"], config=config
+    def api_request_node(state: MessagesState):
+        tools = [check_api_health]
+        system_prompt = """You are an agent tasked with checking the health of an API. Use the check_api_health tool to make a GET request to the API health endpoint and return the status and message. Ensure that you handle any errors gracefully and provide a clear response."""
+        api_agent = DefaultAgent(
+            state=state,
+            model=model,
+            tools=tools,
+            schema=APIHealthEndpoint,
+            config={"configurable": {"thread_id": "2"}},
+            system_prompt=system_prompt,
+        ).graph.invoke(state)
+        api_agent_last = api_agent["messages"][-1]
+        return Command(
+            update={
+                "messages": [
+                    HumanMessage(
+                        content=f"API request completed successfully. Data: {api_agent_last.model_dump_json()}",
+                        name="api",
+                    )
+                ]
+            },
+            goto="supervisor",
+        )
+    
+    agent_roles = ["requester"]
+    supervisor_node = make_supervisor_node(
+        init_chat_model(model), agent_roles, config={"configurable": {"thread_id": "0"}}
     )
 
     builder = StateGraph(MessagesState)
-    builder.add_node("supervisor", search_supervisor_node)
-    builder.add_node("search", search_node)
-    builder.add_node("api", api_request_node)
+    builder.add_node("requester", api_request_node)
+    builder.add_node("supervisor", supervisor_node)
     builder.add_node("FINISH", lambda state: state)  # Terminal node
 
     builder.add_edge(START, "supervisor")
-    builder.add_edge("search", "supervisor")
-    builder.add_edge("api", "supervisor")
+    for role in agent_roles:
+        builder.add_edge(role, "supervisor")
     builder.add_edge("FINISH", END)
 
     checkpointer = MemorySaver()
     app = builder.compile(checkpointer=checkpointer)
 
-    topic = "latest reliable news source affecting stock market"
     messages = app.invoke(
         {
             "messages": [
@@ -187,23 +159,108 @@ def main():
                 )
             ]
         },
-        config=config,
+        config={"configurable": {"thread_id": "0"}},
     )
+
+    return messages
+
+
+def search_team_node(state: MessagesState):
+    model = "openai:gpt-4o-mini"
+
+    def search_node(state: MessagesState):
+        tools = [relevant_site, guess_url]
+        system_prompt = """You are a search agent tasked with finding relevant sites for a given topic. Use the relevant_site and guess_url tools to provide full URLs prefixed as Google News search queries."""
+        search_agent = DefaultAgent(
+            state=state,
+            model=model,
+            tools=tools,
+            schema=GuessURLOutput,
+            config={"configurable": {"thread_id": "1"}},
+            system_prompt=system_prompt,
+        ).graph.invoke(state)
+        search_agent_last = search_agent["messages"][-1]
+        return Command(
+            update={
+                "messages": [
+                    HumanMessage(
+                        content=f"Search completed successfully. Data: {search_agent_last.model_dump_json()}",
+                        name="search",
+                    )
+                ]
+            },
+            goto="supervisor",
+        )
+    agent_roles = ["searcher"]
+    supervisor_node = make_supervisor_node(
+        init_chat_model(model), agent_roles, config={"configurable": {"thread_id": "0"}}
+    )
+
+    builder = StateGraph(MessagesState)
+    builder.add_node("searcher", search_node)
+    builder.add_node("supervisor", supervisor_node)
+    builder.add_node("FINISH", lambda state: state)  # Terminal node
+
+    builder.add_edge(START, "supervisor")
+    for role in agent_roles:
+        builder.add_edge(role, "supervisor")
+    builder.add_edge("FINISH", END)
+
+    checkpointer = MemorySaver()
+    app = builder.compile(checkpointer=checkpointer)
+
+    topic = "latest reliable news source affecting stock market"
+
+    messages = app.invoke(
+    {
+        "messages": [
+            HumanMessage(
+                content=f"Search for a reliable site for the topic: '{topic}' through TLD as .com and return the full URL after appending it as a search query to Google News URL."
+            )
+        ]
+    },
+    config={"configurable": {"thread_id": "0"}},
+)
+
+    return messages
+
+def main(state: MessagesState = MessagesState(messages=[])):
+    model = "openai:gpt-4o-mini"
+
+    agent_roles = ["request_team", "search_team"]
+    supervisor_node = make_supervisor_node(
+            init_chat_model(model), agent_roles, config={"configurable": {"thread_id": "4"}}
+        )
+
+    builder = StateGraph(MessagesState)
+    builder.add_node("request_team", request_team_node)
+    builder.add_node("search_team", search_team_node)
+    builder.add_node("supervisor", supervisor_node)
+    builder.add_node("FINISH", lambda state: state)  # Terminal node
+
+    builder.add_edge(START, "supervisor")
+    for role in agent_roles:
+        builder.add_edge(role, "supervisor")
+    builder.add_edge("FINISH", END)
+
+    checkpointer = MemorySaver()
+    app = builder.compile(checkpointer=checkpointer)
+
+    messages = app.invoke(
+    {
+        "messages": [
+            HumanMessage(
+                content="Delegate tasks to the request team and search team to check API health and find relevant sites for a given topic."
+            )
+        ]
+    },
+    config={"configurable": {"thread_id": "4"}},
+)
+    from IPython.display import Image, display
+
+    display(Image(app.get_graph().draw_mermaid_png()))
 
     for m in messages["messages"]:
         m.pretty_print()
 
-    # for s in app.stream({
-    #         "messages": [
-    #             HumanMessage(
-    #                 content=f"Make a GET request using check_api_health tool to check the health of the API and return the status and message."
-    #             )
-    #         ]
-    #     }, config=config):
-    #     print(s)
-    #     print("---")
-
-
 main()
-
-# If it is healthy, then search for a reliable site for {topic} through TLD as .com and return the full URL after appending it as a search query to Google News URL. If it is not healthy, return the status and message from the API health check.
