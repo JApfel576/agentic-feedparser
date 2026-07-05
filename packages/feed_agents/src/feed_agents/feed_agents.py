@@ -11,8 +11,12 @@ from langchain.messages import HumanMessage
 from langchain_community.utilities import GoogleSerperAPIWrapper
 from pydantic import BaseModel, Field
 from langgraph.types import Command
+from langchain_core.runnables import RunnableConfig
 import requests
+
+# from typer.cli import state
 from base_agents import DefaultAgent, make_supervisor_node, MessagesState
+from typing import Callable, Literal
 
 # Resolve the project root (two levels up from this file)
 ROOT = Path(__file__).resolve().parents[4]
@@ -42,7 +46,6 @@ class Endpoint(str, Enum):
     """Class to hold API endpoint information"""
 
     health = "/health"
-    poll = "/poll"
 
 
 class APIHealthEndpoint(BaseModel):
@@ -106,10 +109,11 @@ def check_api_health(endpoint: str, status: str, message: str) -> dict:
         ).model_dump()
 
 
-def request_team_node(state: MessagesState):
-    model = "openai:gpt-4o-mini"
+def request_team(
+    state: MessagesState, model: str, config: RunnableConfig | None
+) -> Callable[[MessagesState], Command[Literal["supervisor"]]]:
 
-    def api_request_node(state: MessagesState):
+    def api_request_agent(state: MessagesState) -> Command[Literal["supervisor"]]:
         tools = [check_api_health]
         system_prompt = """You are an agent tasked with checking the health of an API. Use the check_api_health tool to make a GET request to the API health endpoint and return the status and message. Ensure that you handle any errors gracefully and provide a clear response."""
         api_agent = DefaultAgent(
@@ -117,7 +121,7 @@ def request_team_node(state: MessagesState):
             model=model,
             tools=tools,
             schema=APIHealthEndpoint,
-            config={"configurable": {"thread_id": "2"}},
+            config=config,
             system_prompt=system_prompt,
         ).graph.invoke(state)
         api_agent_last = api_agent["messages"][-1]
@@ -126,49 +130,54 @@ def request_team_node(state: MessagesState):
                 "messages": [
                     HumanMessage(
                         content=f"API request completed successfully. Data: {api_agent_last.model_dump_json()}",
-                        name="api",
+                        name="api_requester",
                     )
                 ]
             },
             goto="supervisor",
         )
-    
+
     agent_roles = ["requester"]
     supervisor_node = make_supervisor_node(
-        init_chat_model(model), agent_roles, config={"configurable": {"thread_id": "0"}}
+        init_chat_model(model), agent_roles, config=config
     )
 
     builder = StateGraph(MessagesState)
-    builder.add_node("requester", api_request_node)
+    builder.add_node("requester", api_request_agent)
     builder.add_node("supervisor", supervisor_node)
     builder.add_node("FINISH", lambda state: state)  # Terminal node
 
     builder.add_edge(START, "supervisor")
-    for role in agent_roles:
-        builder.add_edge(role, "supervisor")
     builder.add_edge("FINISH", END)
 
     checkpointer = MemorySaver()
     app = builder.compile(checkpointer=checkpointer)
 
-    messages = app.invoke(
-        {
-            "messages": [
-                HumanMessage(
-                    content="Make a GET request to check the health of the API and return the status and message."
-                )
-            ]
-        },
-        config={"configurable": {"thread_id": "0"}},
-    )
+    def call_request_team(state: MessagesState) -> Command[Literal["supervisor"]]:
+        response = app.invoke(
+            {"messages": [state["messages"][-1]]},
+            config=config,
+        )
+        return Command(
+            update={
+                "messages": [
+                    HumanMessage(
+                        content=response["messages"][-1].content,
+                        name="request_team",
+                    )
+                ]
+            },
+            goto="supervisor",
+        )
 
-    return messages
+    return call_request_team
 
 
-def search_team_node(state: MessagesState):
-    model = "openai:gpt-4o-mini"
+def search_team(
+    state: MessagesState, model: str, config: RunnableConfig | None
+) -> Callable[[MessagesState], Command[Literal["supervisor"]]]:
 
-    def search_node(state: MessagesState):
+    def search_agent(state: MessagesState) -> Command[Literal["supervisor"]]:
         tools = [relevant_site, guess_url]
         system_prompt = """You are a search agent tasked with finding relevant sites for a given topic. Use the relevant_site and guess_url tools to provide full URLs prefixed as Google News search queries."""
         search_agent = DefaultAgent(
@@ -176,7 +185,7 @@ def search_team_node(state: MessagesState):
             model=model,
             tools=tools,
             schema=GuessURLOutput,
-            config={"configurable": {"thread_id": "1"}},
+            config=config,
             system_prompt=system_prompt,
         ).graph.invoke(state)
         search_agent_last = search_agent["messages"][-1]
@@ -191,76 +200,94 @@ def search_team_node(state: MessagesState):
             },
             goto="supervisor",
         )
+
     agent_roles = ["searcher"]
+    supervisor_node = make_supervisor_node(
+        init_chat_model(model), agent_roles, config=config
+    )
+
+    builder = StateGraph(MessagesState)
+    builder.add_node("searcher", search_agent)
+    builder.add_node("supervisor", supervisor_node)
+    builder.add_node("FINISH", lambda state: state)  # Terminal node
+
+    builder.add_edge(START, "supervisor")
+    builder.add_edge("FINISH", END)
+
+    checkpointer = MemorySaver()
+    app = builder.compile(checkpointer=checkpointer)
+
+    def call_search_team(state: MessagesState) -> Command[Literal["supervisor"]]:
+        response = app.invoke(
+            {"messages": [state["messages"][-1]]},
+            config=config,
+        )
+        return Command(
+            update={
+                "messages": [
+                    HumanMessage(
+                        content=response["messages"][-1].content,
+                        name="search_team",
+                    )
+                ]
+            },
+            goto="supervisor",
+        )
+
+    return call_search_team
+
+
+def main(state: MessagesState):
+    model = "openai:gpt-4o-mini"
+
+    agent_roles = ["request_team", "search_team"]
     supervisor_node = make_supervisor_node(
         init_chat_model(model), agent_roles, config={"configurable": {"thread_id": "0"}}
     )
 
     builder = StateGraph(MessagesState)
-    builder.add_node("searcher", search_node)
+    builder.add_node(
+        "request_team",
+        request_team(
+            state=state, model=model, config={"configurable": {"thread_id": "1"}}
+        ),
+    )
+    builder.add_node(
+        "search_team",
+        search_team(
+            state=state, model=model, config={"configurable": {"thread_id": "2"}}
+        ),
+    )
     builder.add_node("supervisor", supervisor_node)
     builder.add_node("FINISH", lambda state: state)  # Terminal node
 
     builder.add_edge(START, "supervisor")
-    for role in agent_roles:
-        builder.add_edge(role, "supervisor")
-    builder.add_edge("FINISH", END)
-
-    checkpointer = MemorySaver()
-    app = builder.compile(checkpointer=checkpointer)
-
-    topic = "latest reliable news source affecting stock market"
-
-    messages = app.invoke(
-    {
-        "messages": [
-            HumanMessage(
-                content=f"Search for a reliable site for the topic: '{topic}' through TLD as .com and return the full URL after appending it as a search query to Google News URL."
-            )
-        ]
-    },
-    config={"configurable": {"thread_id": "0"}},
-)
-
-    return messages
-
-def main(state: MessagesState = MessagesState(messages=[])):
-    model = "openai:gpt-4o-mini"
-
-    agent_roles = ["request_team", "search_team"]
-    supervisor_node = make_supervisor_node(
-            init_chat_model(model), agent_roles, config={"configurable": {"thread_id": "4"}}
-        )
-
-    builder = StateGraph(MessagesState)
-    builder.add_node("request_team", request_team_node)
-    builder.add_node("search_team", search_team_node)
-    builder.add_node("supervisor", supervisor_node)
-    builder.add_node("FINISH", lambda state: state)  # Terminal node
-
-    builder.add_edge(START, "supervisor")
-    for role in agent_roles:
-        builder.add_edge(role, "supervisor")
     builder.add_edge("FINISH", END)
 
     checkpointer = MemorySaver()
     app = builder.compile(checkpointer=checkpointer)
 
     messages = app.invoke(
-    {
-        "messages": [
-            HumanMessage(
-                content="Delegate tasks to the request team and search team to check API health and find relevant sites for a given topic."
-            )
-        ]
-    },
-    config={"configurable": {"thread_id": "4"}},
-)
-    from IPython.display import Image, display
-
-    display(Image(app.get_graph().draw_mermaid_png()))
+        {"messages": [state["messages"][-1]]},
+        config={"configurable": {"thread_id": "0"}},
+    )
 
     for m in messages["messages"]:
         m.pretty_print()
 
-main()
+    from IPython.display import Image, display
+
+    display(Image(app.get_graph().draw_mermaid_png()))
+
+
+topic = "latest reliable news source affecting stock market"
+
+main(
+    state=MessagesState(
+        messages=[
+            HumanMessage(
+                content=f"Delegate tasks to the request team and search team to check API health and find relevant sites for '{topic}'."
+            )
+        ]
+    )
+)
