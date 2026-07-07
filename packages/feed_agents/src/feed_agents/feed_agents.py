@@ -7,7 +7,7 @@ from langchain.tools import tool
 from langchain.chat_models import init_chat_model
 from langgraph.graph import StateGraph, START, END
 from langgraph.checkpoint.memory import MemorySaver
-from langchain.messages import HumanMessage
+from langchain.messages import HumanMessage, AIMessage
 from langchain_community.utilities import GoogleSerperAPIWrapper
 from pydantic import BaseModel, Field
 from langgraph.types import Command
@@ -128,7 +128,7 @@ def request_team(
         return Command(
             update={
                 "messages": [
-                    HumanMessage(
+                    AIMessage(
                         content=f"API request completed successfully. Data: {api_agent_last.model_dump_json()}",
                         name="api_requester",
                     )
@@ -161,7 +161,7 @@ def request_team(
         return Command(
             update={
                 "messages": [
-                    HumanMessage(
+                    AIMessage(
                         content=response["messages"][-1].content,
                         name="request_team",
                     )
@@ -192,7 +192,7 @@ def search_team(
         return Command(
             update={
                 "messages": [
-                    HumanMessage(
+                    AIMessage(
                         content=f"Search completed successfully. Data: {search_agent_last.model_dump_json()}",
                         name="search",
                     )
@@ -225,7 +225,7 @@ def search_team(
         return Command(
             update={
                 "messages": [
-                    HumanMessage(
+                    AIMessage(
                         content=response["messages"][-1].content,
                         name="search_team",
                     )
@@ -239,10 +239,10 @@ def search_team(
 
 def main(state: MessagesState):
     model = "openai:gpt-4o-mini"
-
+    system_prompt = """Use the request_team for API related tasks and search_team for finding relevant sites. Ensure that you provide clear instructions to the teams and handle their responses appropriately."""
     agent_roles = ["request_team", "search_team"]
     supervisor_node = make_supervisor_node(
-        init_chat_model(model), agent_roles, config={"configurable": {"thread_id": "0"}}
+        llm=init_chat_model(model), members=agent_roles, system_prompt=system_prompt, config={"configurable": {"thread_id": "0"}}
     )
 
     builder = StateGraph(MessagesState)
@@ -269,7 +269,7 @@ def main(state: MessagesState):
 
     messages = app.invoke(
         {"messages": [state["messages"][-1]]},
-        config={"configurable": {"thread_id": "0"}},
+        config={"configurable": {"thread_id": "3"}},
     )
 
     for m in messages["messages"]:
@@ -286,7 +286,7 @@ main(
     state=MessagesState(
         messages=[
             HumanMessage(
-                content=f"Delegate tasks to the request team and search team to check API health and find relevant sites for '{topic}'."
+                content=f"Check API Health then provide full URLs prefixed as Google News search queries for relevant sites for {topic}."
             )
         ]
     )
