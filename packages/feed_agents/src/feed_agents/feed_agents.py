@@ -242,7 +242,7 @@ def main(state: MessagesState):
     system_prompt = """Use the request_team for API related tasks and search_team for finding relevant sites. Ensure that you provide clear instructions to the teams and handle their responses appropriately."""
     agent_roles = ["request_team", "search_team"]
     supervisor_node = make_supervisor_node(
-        llm=init_chat_model(model), members=agent_roles, system_prompt=system_prompt, config={"configurable": {"thread_id": "0"}}
+        llm=init_chat_model(model), members=agent_roles, config={"configurable": {"thread_id": "0"}}
     )
 
     builder = StateGraph(MessagesState)
