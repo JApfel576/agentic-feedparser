@@ -14,7 +14,7 @@ from langgraph.types import Command
 from langchain_core.runnables import RunnableConfig
 import requests
 
-# from typer.cli import state
+
 from base_agents import DefaultAgent, make_supervisor_node, MessagesState
 from typing import Callable, Literal
 
@@ -66,8 +66,8 @@ def build_api_url(endpoint: Endpoint) -> str:
     return f"{api_host}{endpoint.value}"
 
 
-@tool(args_schema=SiteResponseOutput)
-def relevant_site(topic: str, sites: list[str]) -> dict:
+@tool()
+def relevant_site(topic: str) -> dict:
     """Provide a relevant link for input topic using google serper"""
     results = search.results(k=5, query=topic)
     results = results["organic"]
@@ -76,18 +76,18 @@ def relevant_site(topic: str, sites: list[str]) -> dict:
     return output.model_dump()
 
 
-@tool(args_schema=SiteResponseOutput)
+@tool()
 def guess_url(topic: str, sites: list[str]) -> dict:
     """Prefix relevant site with google news search query url"""
-    sites_res = relevant_site.invoke({"topic": topic, "sites": sites})
+    sites_res = relevant_site.invoke({"topic": topic})
     prefix = "https://news.google.com/search?q="
     full_sites = [f"{prefix}site:{s}" for s in sites_res.get("sites", [])]
     output = GuessURLOutput(topic=sites_res.get("topic", topic), sites=full_sites)
     return output.model_dump()
 
 
-@tool(args_schema=APIHealthEndpoint)
-def check_api_health(endpoint: str, status: str, message: str) -> dict:
+@tool()
+def check_api_health(endpoint: str) -> dict:
     """Check health of API by making a GET request to input parameter value and returning status"""
     endpoint = build_api_url(Endpoint.health)
     try:
@@ -239,10 +239,12 @@ def search_team(
 
 def main(state: MessagesState):
     model = "openai:gpt-4o-mini"
-    system_prompt = """Use the request_team for API related tasks and search_team for finding relevant sites. Ensure that you provide clear instructions to the teams and handle their responses appropriately."""
+    # system_prompt = """Use the request_team for API related tasks and search_team for finding relevant sites. Ensure that you provide clear instructions to the teams and handle their responses appropriately."""
     agent_roles = ["request_team", "search_team"]
     supervisor_node = make_supervisor_node(
-        llm=init_chat_model(model), members=agent_roles, config={"configurable": {"thread_id": "0"}}
+        llm=init_chat_model(model),
+        members=agent_roles,
+        config={"configurable": {"thread_id": "0"}},
     )
 
     builder = StateGraph(MessagesState)
@@ -282,11 +284,12 @@ def main(state: MessagesState):
 
 topic = "latest reliable news source affecting stock market"
 
+
 main(
     state=MessagesState(
         messages=[
             HumanMessage(
-                content=f"Check API Health then provide full URLs prefixed as Google News search queries for relevant sites for {topic}."
+                content=f"Check the health of the API then provide full URLs prefixed as Google News search queries for relevant sites for {topic}."
             )
         ]
     )
