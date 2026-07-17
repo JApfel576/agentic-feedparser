@@ -14,6 +14,7 @@ from langgraph.types import Command
 # Agent State
 class MessagesState(TypedDict):
     messages: Annotated[list[AnyMessage], operator.add]
+    next: str  # last-value-wins routing signal written by make_supervisor_node
 
 
 class DefaultAgent:
@@ -83,10 +84,14 @@ class DefaultAgent:
 
 # class SupervisorAgent(DefaultAgent):
 def make_supervisor_node(
-    llm: BaseChatModel, members: list[str], config: dict
+    llm: BaseChatModel, members: list[str], config: dict, additional_instructions:str = ""
 ) -> Callable[[MessagesState], Command[str]]:
     options = ",".join(["FINISH"] + members)
-    system_prompt = f"You are a supervisor tasked with managing a conversation between the following workers: {options}. Given the following user request, respond with the worker to act next. Each worker will perform a task and respond with their results and status. When finished, respond with FINISH."
+    default_prompt = f"You are a supervisor tasked with managing a conversation between the following workers: {options}. Given the following user request, respond with the worker to act next. Each worker will perform a task and respond with their results and status. When finished, respond with FINISH."
+    if additional_instructions:
+        system_prompt = f"{default_prompt}\n\nAdditional instructions: {additional_instructions.strip()}"
+    else:
+        system_prompt = default_prompt
 
     class Router(TypedDict):
         """Worker to route to next. If no workers needed route to FINISH"""
