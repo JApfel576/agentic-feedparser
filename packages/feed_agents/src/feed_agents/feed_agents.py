@@ -155,7 +155,7 @@ def request_team(
 
     def call_request_team(state: MessagesState) -> Command[Literal["supervisor"]]:
         response = app.invoke(
-            {"messages": [state["messages"][-1]]},
+            {"messages": state["messages"]},
             config=config,
         )
         return Command(
@@ -219,7 +219,7 @@ def search_team(
 
     def call_search_team(state: MessagesState) -> Command[Literal["supervisor"]]:
         response = app.invoke(
-            {"messages": [state["messages"][-1]]},
+            {"messages": state["messages"]},
             config=config,
         )
         return Command(
@@ -239,12 +239,13 @@ def search_team(
 
 def main(state: MessagesState):
     model = "openai:gpt-4o-mini"
-    # system_prompt = """Use the request_team for API related tasks and search_team for finding relevant sites. Ensure that you provide clear instructions to the teams and handle their responses appropriately."""
+    system_prompt = "Use request_team when the task requires executing an API request. If the task benefits from both, call search_team first to gather relevant information, then call request_team with those results. After each worker finishes, return control to the supervisor and decide the next step. Respond with FINISH when all tasks are complete."""
     agent_roles = ["request_team", "search_team"]
     supervisor_node = make_supervisor_node(
-        llm=init_chat_model(model),
+        llm=init_chat_model(model="openai:gpt-5.4-mini"),
         members=agent_roles,
         config={"configurable": {"thread_id": "0"}},
+        additional_instructions=system_prompt
     )
 
     builder = StateGraph(MessagesState)
@@ -261,25 +262,25 @@ def main(state: MessagesState):
         ),
     )
     builder.add_node("supervisor", supervisor_node)
-    builder.add_node("FINISH", lambda state: state)  # Terminal node
 
+    # Routing is driven entirely by the supervisor's Command(goto=<team>|END),
+    # matching the sub-team graphs. No conditional edges / FINISH node needed.
     builder.add_edge(START, "supervisor")
-    builder.add_edge("FINISH", END)
 
     checkpointer = MemorySaver()
     app = builder.compile(checkpointer=checkpointer)
 
     messages = app.invoke(
-        {"messages": [state["messages"][-1]]},
+        {"messages": state["messages"]},
         config={"configurable": {"thread_id": "3"}},
     )
 
     for m in messages["messages"]:
         m.pretty_print()
 
-    from IPython.display import Image, display
+    # from IPython.display import Image, display
 
-    display(Image(app.get_graph().draw_mermaid_png()))
+    # display(Image(app.get_graph().draw_mermaid_png()))
 
 
 topic = "latest reliable news source affecting stock market"
