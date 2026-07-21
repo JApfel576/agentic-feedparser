@@ -14,6 +14,7 @@ from langgraph.types import Command
 from langchain_core.runnables import RunnableConfig
 import requests
 import uuid
+import re
 
 
 from base_agents import DefaultAgent, make_supervisor_node, MessagesState
@@ -57,6 +58,19 @@ class APIHealthEndpoint(BaseModel):
     message: str = Field(
         description="Message providing details from the endpoint about API health"
     )
+
+
+class RoutingDecision(BaseModel):
+    next: Literal["request_team", "search_team", "FINISH"] = Field(
+        description="Next worker to route to, or FINISH if the task is complete"
+    )
+
+
+class LeadModelOutput(BaseModel):
+    """Structured output for lead model routing"""
+
+    messages: list[AIMessage] = Field(description="Messages from the lead model")
+    content: RoutingDecision = Field(description="Next step to route to")
 
 
 search = GoogleSerperAPIWrapper()
@@ -241,42 +255,68 @@ def search_team(
 def main(state: MessagesState):
     thread_id = str(uuid.uuid4())
     model = "openai:gpt-4o-mini"
-    system_prompt = "Use request_team when the task requires executing an API request. If the task benefits from both, call search_team first to gather relevant information, then call request_team. After each worker finishes, return control to the supervisor and decide the next step. Respond with FINISH when all tasks are complete."""
-    agent_roles = ["request_team", "search_team"]
-    supervisor_node = make_supervisor_node(
-        llm=init_chat_model(model="openai:gpt-5.4-mini"),
-        members=agent_roles,
-        config={"configurable": {"thread_id": thread_id}},
-        additional_instructions=system_prompt
-    )
+    config = {"configurable": {"thread_id": thread_id}}
+    lead_model = init_chat_model(model="openai:gpt-4o-mini", temperature=0)
+    system_prompt = "You are an agent. Your only job is to route to a single next step. When the tasks are complete, respond with exactly the single word FINISH and nothing else."
+
+    FINISH_TOKEN = "FINISH"
+
+    def supervisor_node(state: MessagesState, config: RunnableConfig) -> MessagesState:
+        messages = [{"role": "system", "content": system_prompt}] + state["messages"]
+        return {
+            "messages": [
+                lead_model.with_structured_output(LeadModelOutput).invoke(
+                    messages[-1].content, config=config
+                )
+            ]
+        }
+
+    def route_next_step(
+        state: MessagesState,
+    ) -> Command[Literal["request_team", "search_team", "__end__"]]:
+        last_message = state["messages"][-1]
+        content = last_message.content.lower()
+
+        if content.upper() == FINISH_TOKEN:
+            return Command(goto=END, update={"next": "FINISH"})
+
+        if re.search(r"\bapi\b", content):
+            goto = "request_team"
+        elif re.search(r"\bsearch\b", content):
+            goto = "search_team"
+        else:
+            import logging
+
+            logging.getLogger(__name__).warning(
+                "No FINISH token and no route keyword matched; content=%r",
+                content[:200],
+            )
+            goto = END
+        return Command(goto=goto, update={"next": goto})
 
     builder = StateGraph(MessagesState)
+    builder.add_node("supervisor", supervisor_node)
+    builder.add_node("route_next_step", route_next_step)
     builder.add_node(
         "request_team",
-        request_team(
-            state=state, model=model, config={"configurable": {"thread_id": thread_id}}
-        ),
+        request_team(state=state, model=model, config=config),
     )
     builder.add_node(
         "search_team",
-        search_team(
-            state=state, model=model, config={"configurable": {"thread_id": thread_id}}
-        ),
+        search_team(state=state, model=model, config=config),
     )
-    builder.add_node("supervisor", supervisor_node)
 
-    # Routing is driven entirely by the supervisor's Command(goto=<team>|END),
-    # matching the sub-team graphs. No conditional edges / FINISH node needed.
     builder.add_edge(START, "supervisor")
-
-    # add conditional edge and graph for deterministic supervisor
+    builder.add_edge("supervisor", "route_next_step")
+    builder.add_edge("request_team", "route_next_step")
+    builder.add_edge("search_team", "route_next_step")
 
     checkpointer = MemorySaver()
     app = builder.compile(checkpointer=checkpointer)
 
     messages = app.invoke(
         {"messages": state["messages"]},
-        config={"configurable": {"thread_id": thread_id}},
+        config=config,
     )
 
     for m in messages["messages"]:
