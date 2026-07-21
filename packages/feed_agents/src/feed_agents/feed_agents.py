@@ -13,6 +13,7 @@ from pydantic import BaseModel, Field
 from langgraph.types import Command
 from langchain_core.runnables import RunnableConfig
 import requests
+import uuid
 
 
 from base_agents import DefaultAgent, make_supervisor_node, MessagesState
@@ -238,13 +239,14 @@ def search_team(
 
 
 def main(state: MessagesState):
+    thread_id = str(uuid.uuid4())
     model = "openai:gpt-4o-mini"
-    system_prompt = "Use request_team when the task requires executing an API request. If the task benefits from both, call search_team first to gather relevant information, then call request_team with those results. After each worker finishes, return control to the supervisor and decide the next step. Respond with FINISH when all tasks are complete."""
+    system_prompt = "Use request_team when the task requires executing an API request. If the task benefits from both, call search_team first to gather relevant information, then call request_team. After each worker finishes, return control to the supervisor and decide the next step. Respond with FINISH when all tasks are complete."""
     agent_roles = ["request_team", "search_team"]
     supervisor_node = make_supervisor_node(
         llm=init_chat_model(model="openai:gpt-5.4-mini"),
         members=agent_roles,
-        config={"configurable": {"thread_id": "0"}},
+        config={"configurable": {"thread_id": thread_id}},
         additional_instructions=system_prompt
     )
 
@@ -252,13 +254,13 @@ def main(state: MessagesState):
     builder.add_node(
         "request_team",
         request_team(
-            state=state, model=model, config={"configurable": {"thread_id": "1"}}
+            state=state, model=model, config={"configurable": {"thread_id": thread_id}}
         ),
     )
     builder.add_node(
         "search_team",
         search_team(
-            state=state, model=model, config={"configurable": {"thread_id": "2"}}
+            state=state, model=model, config={"configurable": {"thread_id": thread_id}}
         ),
     )
     builder.add_node("supervisor", supervisor_node)
@@ -267,12 +269,14 @@ def main(state: MessagesState):
     # matching the sub-team graphs. No conditional edges / FINISH node needed.
     builder.add_edge(START, "supervisor")
 
+    # add conditional edge and graph for deterministic supervisor
+
     checkpointer = MemorySaver()
     app = builder.compile(checkpointer=checkpointer)
 
     messages = app.invoke(
         {"messages": state["messages"]},
-        config={"configurable": {"thread_id": "3"}},
+        config={"configurable": {"thread_id": thread_id}},
     )
 
     for m in messages["messages"]:
