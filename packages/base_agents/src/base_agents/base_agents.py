@@ -3,7 +3,7 @@ from langgraph.graph import StateGraph, START, END
 from langgraph.checkpoint.memory import MemorySaver
 from langchain.messages import AnyMessage, SystemMessage
 from typing_extensions import TypedDict
-from typing import Annotated
+from typing import Annotated, Literal
 from collections.abc import Callable
 import operator
 from pydantic import BaseModel, Field
@@ -82,28 +82,27 @@ class DefaultAgent:
         }
 
 
-# class SupervisorAgent(DefaultAgent):
 def make_supervisor_node(
     llm: BaseChatModel, members: list[str], config: dict, additional_instructions:str = ""
 ) -> Callable[[MessagesState], Command[str]]:
-    options = ",".join(["FINISH"] + members)
-    default_prompt = f"You are a supervisor tasked with managing a conversation between the following workers: {options}. Given the following user request, respond with the worker to act next. Each worker will perform a task and respond with their results and status. When finished, respond with FINISH."
+    options = ["FINISH"] + members
+    options_str = ",".join(options)
+    default_prompt = f"You are a supervisor tasked with managing a conversation between the following workers: {options_str}. Given the following user request, respond with the worker to act next. Each worker will perform a task and respond with their results and status. When finished, respond with FINISH."
     if additional_instructions:
         system_prompt = f"{default_prompt}\n\nAdditional instructions: {additional_instructions.strip()}"
     else:
         system_prompt = default_prompt
 
-    class Router(TypedDict):
+    class Router(BaseModel):
         """Worker to route to next. If no workers needed route to FINISH"""
-
-        next: str = Field(description=f"Next worker to route to. Options: {options}")
+        next: Literal[tuple(options)] = Field(description=f"Next worker to route to. Options: {options_str}") # type: ignore
 
     def supervisor_node(state: MessagesState) -> Command[str]:
-        messages = [{"role": "system", "content": system_prompt}] + state["messages"]
+        messages = [SystemMessage(content=system_prompt)] + state["messages"]
         response = llm.with_structured_output(Router).invoke(messages, config=config)
-        choice = response["next"]
+        choice = response.next
         if choice == "FINISH":
-            goto = END
+            goto = "__end__"
         else:
             goto = choice
         return Command(goto=goto, update={"next": choice})
