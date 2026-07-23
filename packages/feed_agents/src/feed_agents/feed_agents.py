@@ -7,14 +7,15 @@ from langchain.tools import tool
 from langchain.chat_models import init_chat_model
 from langgraph.graph import StateGraph, START, END
 from langgraph.checkpoint.memory import MemorySaver
-from langchain.messages import HumanMessage, AIMessage
+from langchain.messages import HumanMessage, AIMessage, AnyMessage, SystemMessage
 from langchain_community.utilities import GoogleSerperAPIWrapper
 from pydantic import BaseModel, Field
 from langgraph.types import Command
 from langchain_core.runnables import RunnableConfig
 import requests
 import uuid
-import re
+from typing import Annotated
+import operator
 
 
 from base_agents import DefaultAgent, make_supervisor_node, MessagesState
@@ -61,16 +62,11 @@ class APIHealthEndpoint(BaseModel):
 
 
 class RoutingDecision(BaseModel):
-    next: Literal["request_team", "search_team", "FINISH"] = Field(
-        description="Next worker to route to, or FINISH if the task is complete"
-    )
-
-
-class LeadModelOutput(BaseModel):
     """Structured output for lead model routing"""
 
-    messages: list[AIMessage] = Field(description="Messages from the lead model")
-    content: RoutingDecision = Field(description="Next step to route to")
+    next: Literal["request_team", "search_team", "FINISH"] = Field(
+        description="Next step to route to, or FINISH if the task is complete"
+    )
 
 
 search = GoogleSerperAPIWrapper()
@@ -138,7 +134,7 @@ def request_team(
             schema=APIHealthEndpoint,
             config=config,
             system_prompt=system_prompt,
-        ).graph.invoke(state)
+        ).graph.invoke(state["messages"][-1])
         api_agent_last = api_agent["messages"][-1]
         return Command(
             update={
@@ -170,7 +166,9 @@ def request_team(
 
     def call_request_team(state: MessagesState) -> Command[Literal["supervisor"]]:
         response = app.invoke(
-            {"messages": state["messages"]},
+            {
+                "messages": state["messages"][-1:]
+            },  # Pass only the last message to the request team
             config=config,
         )
         return Command(
@@ -202,7 +200,7 @@ def search_team(
             schema=GuessURLOutput,
             config=config,
             system_prompt=system_prompt,
-        ).graph.invoke(state)
+        ).graph.invoke(state["messages"][-1])
         search_agent_last = search_agent["messages"][-1]
         return Command(
             update={
@@ -234,7 +232,9 @@ def search_team(
 
     def call_search_team(state: MessagesState) -> Command[Literal["supervisor"]]:
         response = app.invoke(
-            {"messages": state["messages"]},
+            {
+                "messages": state["messages"][-1:]
+            },  # Pass only the last message to the search team
             config=config,
         )
         return Command(
@@ -254,49 +254,25 @@ def search_team(
 
 def main(state: MessagesState):
     thread_id = str(uuid.uuid4())
-    model = "openai:gpt-4o-mini"
+    model = "openai:gpt-5.4-mini"
     config = {"configurable": {"thread_id": thread_id}}
-    lead_model = init_chat_model(model="openai:gpt-4o-mini", temperature=0)
+    lead_model = init_chat_model(model=model, temperature=0)
     system_prompt = "You are an agent. Your only job is to route to a single next step. When the tasks are complete, respond with exactly the single word FINISH and nothing else."
 
     FINISH_TOKEN = "FINISH"
 
     def supervisor_node(state: MessagesState, config: RunnableConfig) -> MessagesState:
-        messages = [{"role": "system", "content": system_prompt}] + state["messages"]
-        return {
-            "messages": [
-                lead_model.with_structured_output(LeadModelOutput).invoke(
-                    messages[-1].content, config=config
-                )
-            ]
-        }
+        messages = [SystemMessage(content=system_prompt)] + state["messages"]
 
-    def route_next_step(
-        state: MessagesState,
-    ) -> Command[Literal["request_team", "search_team", "__end__"]]:
-        last_message = state["messages"][-1]
-        content = last_message.content.lower()
-
-        if content.upper() == FINISH_TOKEN:
-            return Command(goto=END, update={"next": "FINISH"})
-
-        if re.search(r"\bapi\b", content):
-            goto = "request_team"
-        elif re.search(r"\bsearch\b", content):
-            goto = "search_team"
-        else:
-            import logging
-
-            logging.getLogger(__name__).warning(
-                "No FINISH token and no route keyword matched; content=%r",
-                content[:200],
-            )
-            goto = END
-        return Command(goto=goto, update={"next": goto})
+        routing_decision = lead_model.with_structured_output(RoutingDecision).invoke(
+            messages, config=config
+        )
+        choice = routing_decision.next
+        goto = "__end__" if choice == FINISH_TOKEN else choice
+        return Command(goto=goto, update={"next": choice})
 
     builder = StateGraph(MessagesState)
     builder.add_node("supervisor", supervisor_node)
-    builder.add_node("route_next_step", route_next_step)
     builder.add_node(
         "request_team",
         request_team(state=state, model=model, config=config),
@@ -305,11 +281,9 @@ def main(state: MessagesState):
         "search_team",
         search_team(state=state, model=model, config=config),
     )
+    builder.add_node("FINISH", lambda state: state)  # Terminal node
 
     builder.add_edge(START, "supervisor")
-    builder.add_edge("supervisor", "route_next_step")
-    builder.add_edge("request_team", "route_next_step")
-    builder.add_edge("search_team", "route_next_step")
 
     checkpointer = MemorySaver()
     app = builder.compile(checkpointer=checkpointer)
@@ -321,10 +295,6 @@ def main(state: MessagesState):
 
     for m in messages["messages"]:
         m.pretty_print()
-
-    # from IPython.display import Image, display
-
-    # display(Image(app.get_graph().draw_mermaid_png()))
 
 
 topic = "latest reliable news source affecting stock market"
