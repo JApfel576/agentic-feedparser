@@ -273,7 +273,6 @@ def main(state: MessagesState):
 
     builder = StateGraph(MessagesState)
     builder.add_node("supervisor", supervisor_node)
-    # builder.add_node("route_next_step", route_next_step)
     builder.add_node(
         "request_team",
         request_team(state=state, model=model, config=config),
@@ -285,10 +284,6 @@ def main(state: MessagesState):
     builder.add_node("FINISH", lambda state: state)  # Terminal node
 
     builder.add_edge(START, "supervisor")
-
-    # builder.add_edge("supervisor", "route_next_step")
-    # builder.add_edge("request_team", "route_next_step")
-    # builder.add_edge("search_team", "route_next_step")
 
     checkpointer = MemorySaver()
     app = builder.compile(checkpointer=checkpointer)
