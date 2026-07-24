@@ -41,9 +41,7 @@ class DefaultAgent:
         self.graph = self.workflow.compile(checkpointer=self.checkpointer)
 
         self.llm = init_chat_model(model=self.model, temperature=0)
-        self.llm_with_tools = self.llm.bind_tools(
-            tools=self.tools
-        )
+        self.llm_with_tools = self.llm.bind_tools(tools=self.tools)
 
     def setup_graph(self):
         self.workflow.add_node("agent", self.call_agent)
@@ -69,13 +67,12 @@ class DefaultAgent:
 
     def call_structured_agent(self, state: MessagesState) -> dict:
         messages = state["messages"]
-        last_message = messages[-1]
         return {
             "messages": [
                 self.llm.with_structured_output(
                     self.schema, strict=True, include_raw=False
                 ).invoke(
-                    last_message.content,
+                    messages,
                     config=self.config,
                 )
             ]
@@ -83,7 +80,10 @@ class DefaultAgent:
 
 
 def make_supervisor_node(
-    llm: BaseChatModel, members: list[str], config: dict, additional_instructions:str = ""
+    llm: BaseChatModel,
+    members: list[str],
+    config: dict,
+    additional_instructions: str = "",
 ) -> Callable[[MessagesState], Command[str]]:
     options = ["FINISH"] + members
     options_str = ",".join(options)
@@ -95,7 +95,10 @@ def make_supervisor_node(
 
     class Router(BaseModel):
         """Worker to route to next. If no workers needed route to FINISH"""
-        next: Literal[tuple(options)] = Field(description=f"Next worker to route to. Options: {options_str}") # type: ignore
+
+        next: Literal[tuple(options)] = Field(
+            description=f"Next worker to route to. Options: {options_str}"
+        )  # type: ignore
 
     def supervisor_node(state: MessagesState) -> Command[str]:
         messages = [SystemMessage(content=system_prompt)] + state["messages"]
