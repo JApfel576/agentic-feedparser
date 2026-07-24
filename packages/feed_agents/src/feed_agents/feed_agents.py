@@ -2,20 +2,17 @@ from enum import Enum
 from pathlib import Path
 from dotenv import load_dotenv
 import os
-from langchain import messages
 from langchain.tools import tool
 from langchain.chat_models import init_chat_model
-from langgraph.graph import StateGraph, START, END
+from langgraph.graph import StateGraph, START
 from langgraph.checkpoint.memory import MemorySaver
-from langchain.messages import HumanMessage, AIMessage, AnyMessage, SystemMessage
+from langchain.messages import HumanMessage, AIMessage, SystemMessage
 from langchain_community.utilities import GoogleSerperAPIWrapper
 from pydantic import BaseModel, Field
 from langgraph.types import Command
 from langchain_core.runnables import RunnableConfig
 import requests
 import uuid
-from typing import Annotated
-import operator
 
 
 from base_agents import DefaultAgent, make_supervisor_node, MessagesState
@@ -123,10 +120,11 @@ def check_api_health(endpoint: str) -> dict:
 def request_team(
     state: MessagesState, model: str, config: RunnableConfig | None
 ) -> Callable[[MessagesState], Command[Literal["supervisor"]]]:
-
     def api_request_agent(state: MessagesState) -> Command[Literal["supervisor"]]:
         tools = [check_api_health]
         system_prompt = """You are an agent tasked with checking the health of an API. Use the check_api_health tool to make a GET request to the API health endpoint and return the status and message. Ensure that you handle any errors gracefully and provide a clear response."""
+        messages = state["messages"]
+        last_message = messages[-1]
         api_agent = DefaultAgent(
             state=state,
             model=model,
@@ -134,7 +132,7 @@ def request_team(
             schema=APIHealthEndpoint,
             config=config,
             system_prompt=system_prompt,
-        ).graph.invoke(state["messages"][-1])
+        ).graph.invoke({"messages": [last_message]}, config=config)
         api_agent_last = api_agent["messages"][-1]
         return Command(
             update={
@@ -156,18 +154,19 @@ def request_team(
     builder = StateGraph(MessagesState)
     builder.add_node("requester", api_request_agent)
     builder.add_node("supervisor", supervisor_node)
-    builder.add_node("FINISH", lambda state: state)  # Terminal node
 
     builder.add_edge(START, "supervisor")
-    builder.add_edge("FINISH", END)
 
     checkpointer = MemorySaver()
     app = builder.compile(checkpointer=checkpointer)
 
     def call_request_team(state: MessagesState) -> Command[Literal["supervisor"]]:
+        original_request = next(
+            m for m in state["messages"] if isinstance(m, HumanMessage)
+        )
         response = app.invoke(
             {
-                "messages": state["messages"][-1:]
+                "messages": [original_request]
             },  # Pass only the last message to the request team
             config=config,
         )
@@ -189,10 +188,11 @@ def request_team(
 def search_team(
     state: MessagesState, model: str, config: RunnableConfig | None
 ) -> Callable[[MessagesState], Command[Literal["supervisor"]]]:
-
     def search_agent(state: MessagesState) -> Command[Literal["supervisor"]]:
         tools = [relevant_site, guess_url]
         system_prompt = """You are a search agent tasked with finding relevant sites for a given topic. Use the relevant_site and guess_url tools to provide full URLs prefixed as Google News search queries."""
+        messages = state["messages"]
+        last_message = messages[-1]
         search_agent = DefaultAgent(
             state=state,
             model=model,
@@ -200,7 +200,7 @@ def search_team(
             schema=GuessURLOutput,
             config=config,
             system_prompt=system_prompt,
-        ).graph.invoke(state["messages"][-1])
+        ).graph.invoke({"messages": [last_message]}, config=config)
         search_agent_last = search_agent["messages"][-1]
         return Command(
             update={
@@ -222,18 +222,19 @@ def search_team(
     builder = StateGraph(MessagesState)
     builder.add_node("searcher", search_agent)
     builder.add_node("supervisor", supervisor_node)
-    builder.add_node("FINISH", lambda state: state)  # Terminal node
 
     builder.add_edge(START, "supervisor")
-    builder.add_edge("FINISH", END)
 
     checkpointer = MemorySaver()
     app = builder.compile(checkpointer=checkpointer)
 
     def call_search_team(state: MessagesState) -> Command[Literal["supervisor"]]:
+        original_request = next(
+            m for m in state["messages"] if isinstance(m, HumanMessage)
+        )
         response = app.invoke(
             {
-                "messages": state["messages"][-1:]
+                "messages": [original_request]
             },  # Pass only the last message to the search team
             config=config,
         )
@@ -252,16 +253,24 @@ def search_team(
     return call_search_team
 
 
-def main(state: MessagesState):
+def call_teams(state: MessagesState):
     thread_id = str(uuid.uuid4())
     model = "openai:gpt-5.4-mini"
     config = {"configurable": {"thread_id": thread_id}}
     lead_model = init_chat_model(model=model, temperature=0)
-    system_prompt = "You are an agent. Your only job is to route to a single next step. When the tasks are complete, respond with exactly the single word FINISH and nothing else."
-
+    system_prompt = (
+    "You are the lead supervisor routing between two worker teams:\n"
+    "- 'request_team': checks API health/status.\n"
+    "- 'search_team': finds relevant sites and returns full Google News search URLs.\n"
+    "Route to the one team needed for the next unfinished part of the request. "
+    "A team's result appears as a message named after it once it's run — don't "
+    "re-route to a team that's already done. When everything is complete, respond FINISH."
+    )
     FINISH_TOKEN = "FINISH"
 
-    def supervisor_node(state: MessagesState, config: RunnableConfig) -> MessagesState:
+    def supervisor_node(
+        state: MessagesState, config: RunnableConfig
+    ) -> Command[Literal["request_team", "search_team", "__end__"]]:
         messages = [SystemMessage(content=system_prompt)] + state["messages"]
 
         routing_decision = lead_model.with_structured_output(RoutingDecision).invoke(
@@ -281,7 +290,6 @@ def main(state: MessagesState):
         "search_team",
         search_team(state=state, model=model, config=config),
     )
-    builder.add_node("FINISH", lambda state: state)  # Terminal node
 
     builder.add_edge(START, "supervisor")
 
@@ -297,15 +305,14 @@ def main(state: MessagesState):
         m.pretty_print()
 
 
-topic = "latest reliable news source affecting stock market"
-
-
-main(
-    state=MessagesState(
-        messages=[
-            HumanMessage(
-                content=f"Check the health of the API then provide full URLs prefixed as Google News search queries for relevant sites for {topic}."
-            )
-        ]
+if __name__ == "__main__":
+    topic = "latest reliable news source affecting stock market"
+    call_teams(
+        state=MessagesState(
+            messages=[
+                HumanMessage(
+                    content=f"<question1>Check the health of the API</question1> <question2>provide full URLs prefixed as Google News search queries for relevant sites for {topic}.</question2>"
+                )
+            ]
+        )
     )
-)
