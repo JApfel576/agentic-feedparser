@@ -20,6 +20,7 @@ This project provides a small RSS feed poller that pulls article metadata from a
 
 4. Let an LLM choose which articles to fully scrape 
 **IN PROGRESS**
+<img src="assets/agent_teams_graph.png" width="600" alt="Screenshot">
 
 6. Optionally fetch, convert to Markdown, chunk, and embed **TODO**
 
