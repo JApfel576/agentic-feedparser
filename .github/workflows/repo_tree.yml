@@ -25,7 +25,7 @@ jobs:
           tree -I 'node_modules|.git|__pycache__|.venv' >> PROJECT_STRUCTURE.md
           echo '```' >> PROJECT_STRUCTURE.md
 
-       - name: Commit and push if changed
+      - name: Commit and push if changed
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
