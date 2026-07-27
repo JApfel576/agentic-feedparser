@@ -1,0 +1,12 @@
+services:
+  server:
+    build:
+      context: .
+    volumes:
+      - feed-data:/var/data
+    ports:
+      - 8000:8000
+
+volumes:
+  feed-data:
+    external: true
