@@ -33,68 +33,9 @@ This approach avoids scraping entire sites unless the metadata indicates the art
 
   
 
-## Structure
+## Project Structure
 
   
 
-```
-
-|---src
-
-| +---feedpoller
-
-| | | feedpoller.py
-
-| | | __init__.py
-
-| |
-
-| \---feedpoller.egg-info
-
-| | dependency_links.txt
-
-| | PKG-INFO
-
-| | requires.txt
-
-| | SOURCES.txt
-
-| | top_level.txt
-
-|
-
-+---services
-
-| \---fastapi_app
-
-| | pyproject.toml
-
-| |
-
-| \---src
-
-| \---fastapi_app
-
-| | main.py
-
-|
-
-\---var
-
-\---data
-
-+---bbc_com
-
-| 20260515_183820.json
-
-| state.json
-
-|
-
-\---reuters_com
-
-20260515_183846.json
-
-state.json
-
-```
+<!-- TREE_START -->
+<!-- TREE_END -->
