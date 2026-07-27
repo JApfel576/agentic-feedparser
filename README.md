@@ -43,8 +43,11 @@ This approach avoids scraping entire sites unless the metadata indicates the art
 .
 ├── Dockerfile
 ├── LICENSE
+├── PROJECT_STRUCTURE.md
 ├── README.Docker.md
 ├── README.md
+├── assets
+│   └── agent_teams_graph.png
 ├── compose.yaml
 ├── packages
 │   ├── base_agents
@@ -96,6 +99,6 @@ This approach avoids scraping entire sites unless the metadata indicates the art
             ├── 20260515_183846.json
             └── state.json
 
-21 directories, 34 files
+22 directories, 36 files
 ```
 <!-- TREE_END -->
