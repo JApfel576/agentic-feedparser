@@ -1,0 +1,27 @@
+name: Generate Project Tree
+
+on:
+  push:
+    branches:
+      - main
+      - feature/**
+  workflow_dispatch:  # lets you trigger it manually from the Actions tab
+
+jobs:
+  tree:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write  # needed to commit the file back
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Install tree
+        run: sudo apt-get update && sudo apt-get install -y tree
+
+      - name: Generate tree
+        run: |
+          echo '```' > PROJECT_STRUCTURE.md
+          tree -I 'node_modules|.git|__pycache__|.venv' >> PROJECT_STRUCTURE.md
+          echo '```' >> PROJECT_STRUCTURE.md
