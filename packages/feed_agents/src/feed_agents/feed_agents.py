@@ -61,9 +61,18 @@ class APIHealthEndpoint(BaseModel):
 class RoutingDecision(BaseModel):
     """Structured output for lead model routing"""
 
-    next: Literal["request_team", "search_team", "FINISH"] = Field(
-        description="Next step to route to, or FINISH if the task is complete"
+    next: Literal["request_team", "search_team", "FINISH"]
+    instruction: str | None = Field(
+        default=None,
+        description="The specific sub-task text to hand to the chosen team. "
+        "Should contain only what that team needs — not the full original request. "
+        "Omit or leave empty when next is FINISH.",
     )
+
+
+class SupervisorState(MessagesState):
+    next: Literal["request_team", "search_team", "FINISH"] | None
+    current_instruction: str | None
 
 
 search = GoogleSerperAPIWrapper()
@@ -118,9 +127,9 @@ def check_api_health(endpoint: str) -> dict:
 
 
 def request_team(
-    state: MessagesState, model: str, config: RunnableConfig | None
-) -> Callable[[MessagesState], Command[Literal["supervisor"]]]:
-    def api_request_agent(state: MessagesState) -> Command[Literal["supervisor"]]:
+    state: SupervisorState, model: str, config: RunnableConfig | None
+) -> Callable[[SupervisorState], Command[Literal["supervisor"]]]:
+    def api_request_agent(state: SupervisorState) -> Command[Literal["supervisor"]]:
         tools = [check_api_health]
         system_prompt = """You are an agent tasked with checking the health of an API. Use the check_api_health tool to make a GET request to the API health endpoint and return the status and message. Ensure that you handle any errors gracefully and provide a clear response."""
         messages = state["messages"]
@@ -146,13 +155,15 @@ def request_team(
             goto="supervisor",
         )
 
-    agent_roles = ["requester"]
+    agent_roles = ["requester"]  # used to direct supervisor to agent(s)
     supervisor_node = make_supervisor_node(
         init_chat_model(model), agent_roles, config=config
     )
 
-    builder = StateGraph(MessagesState)
-    builder.add_node("requester", api_request_agent)
+    builder = StateGraph(SupervisorState)
+    builder.add_node(
+        "requester", api_request_agent
+    )  # agent subgraph node, returns updates to supervisor
     builder.add_node("supervisor", supervisor_node)
 
     builder.add_edge(START, "supervisor")
@@ -160,14 +171,12 @@ def request_team(
     checkpointer = MemorySaver()
     app = builder.compile(checkpointer=checkpointer)
 
-    def call_request_team(state: MessagesState) -> Command[Literal["supervisor"]]:
-        original_request = next(
-            m for m in state["messages"] if isinstance(m, HumanMessage)
-        )
+    def call_request_team(state: SupervisorState) -> Command[Literal["supervisor"]]:
+        instruction = state["current_instruction"]
         response = app.invoke(
             {
-                "messages": [original_request]
-            },  # Pass only the last message to the request team
+                "messages": [HumanMessage(content=instruction)]
+            },  # Pass instruction from supervisor to search team
             config=config,
         )
         return Command(
@@ -186,9 +195,9 @@ def request_team(
 
 
 def search_team(
-    state: MessagesState, model: str, config: RunnableConfig | None
-) -> Callable[[MessagesState], Command[Literal["supervisor"]]]:
-    def search_agent(state: MessagesState) -> Command[Literal["supervisor"]]:
+    state: SupervisorState, model: str, config: RunnableConfig | None
+) -> Callable[[SupervisorState], Command[Literal["supervisor"]]]:
+    def search_agent(state: SupervisorState) -> Command[Literal["supervisor"]]:
         tools = [relevant_site, guess_url]
         system_prompt = """You are a search agent tasked with finding relevant sites for a given topic. Use the relevant_site and guess_url tools to provide full URLs prefixed as Google News search queries."""
         messages = state["messages"]
@@ -201,7 +210,7 @@ def search_team(
             config=config,
             system_prompt=system_prompt,
         ).graph.invoke({"messages": [last_message]}, config=config)
-        search_agent_last = search_agent["messages"][-1]
+        search_agent_last = search_agent["messages"][-1]  # structured output only
         return Command(
             update={
                 "messages": [
@@ -214,13 +223,15 @@ def search_team(
             goto="supervisor",
         )
 
-    agent_roles = ["searcher"]
+    agent_roles = ["searcher"]  # used to direct supervisor to agent(s)
     supervisor_node = make_supervisor_node(
         init_chat_model(model), agent_roles, config=config
     )
 
-    builder = StateGraph(MessagesState)
-    builder.add_node("searcher", search_agent)
+    builder = StateGraph(SupervisorState)
+    builder.add_node(
+        "searcher", search_agent
+    )  # agent subgraph node, returns updates to supervisor
     builder.add_node("supervisor", supervisor_node)
 
     builder.add_edge(START, "supervisor")
@@ -228,14 +239,12 @@ def search_team(
     checkpointer = MemorySaver()
     app = builder.compile(checkpointer=checkpointer)
 
-    def call_search_team(state: MessagesState) -> Command[Literal["supervisor"]]:
-        original_request = next(
-            m for m in state["messages"] if isinstance(m, HumanMessage)
-        )
+    def call_search_team(state: SupervisorState) -> Command[Literal["supervisor"]]:
+        instruction = state["current_instruction"]
         response = app.invoke(
             {
-                "messages": [original_request]
-            },  # Pass only the last message to the search team
+                "messages": [HumanMessage(content=instruction)]
+            },  # Pass instruction from supervisor to search team
             config=config,
         )
         return Command(
@@ -253,23 +262,28 @@ def search_team(
     return call_search_team
 
 
-def call_teams(state: MessagesState):
+def call_teams(state: SupervisorState):
     thread_id = str(uuid.uuid4())
     model = "openai:gpt-5.4-mini"
     config = {"configurable": {"thread_id": thread_id}}
     lead_model = init_chat_model(model=model, temperature=0)
     system_prompt = (
-    "You are the lead supervisor routing between two worker teams:\n"
-    "- 'request_team': checks API health/status.\n"
-    "- 'search_team': finds relevant sites and returns full Google News search URLs.\n"
-    "Route to the one team needed for the next unfinished part of the request. "
-    "A team's result appears as a message named after it once it's run — don't "
-    "re-route to a team that's already done. When everything is complete, respond FINISH."
+        "You are the lead supervisor routing between two worker teams:\n"
+        "- 'request_team': checks the health of the API.\n"
+        "- 'search_team': finds relevant sites for a topic and returns full Google "
+        "News search URLs.\n\n"
+        "The user's request may contain multiple sub-tasks. Break it down and, for "
+        "each unfinished sub-task, route to the team that owns it. When you route to "
+        "a team, write a clear, self-contained 'instruction' string containing ONLY "
+        "the sub-task text that team needs — do not include unrelated parts of the "
+        "request. A team's result appears as a message named after that team once it "
+        "has run; do not route to a team whose part is already done. When every "
+        "sub-task has been completed, respond with next=FINISH."
     )
     FINISH_TOKEN = "FINISH"
 
     def supervisor_node(
-        state: MessagesState, config: RunnableConfig
+        state: SupervisorState, config: RunnableConfig
     ) -> Command[Literal["request_team", "search_team", "__end__"]]:
         messages = [SystemMessage(content=system_prompt)] + state["messages"]
 
@@ -278,9 +292,15 @@ def call_teams(state: MessagesState):
         )
         choice = routing_decision.next
         goto = "__end__" if choice == FINISH_TOKEN else choice
-        return Command(goto=goto, update={"next": choice})
+        return Command(
+            goto=goto,
+            update={
+                "next": choice,
+                "current_instruction": routing_decision.instruction,
+            },
+        )
 
-    builder = StateGraph(MessagesState)
+    builder = StateGraph(SupervisorState)
     builder.add_node("supervisor", supervisor_node)
     builder.add_node(
         "request_team",
@@ -308,10 +328,10 @@ def call_teams(state: MessagesState):
 if __name__ == "__main__":
     topic = "latest reliable news source affecting stock market"
     call_teams(
-        state=MessagesState(
+        state=SupervisorState(
             messages=[
                 HumanMessage(
-                    content=f"<question1>Check the health of the API</question1> <question2>provide full URLs prefixed as Google News search queries for relevant sites for {topic}.</question2>"
+                    content=f"Check the health of the API.Provide full URLs prefixed as Google News search queries for relevant sites for {topic}"
                 )
             ]
         )
