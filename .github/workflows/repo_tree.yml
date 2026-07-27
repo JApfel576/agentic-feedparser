@@ -19,16 +19,19 @@ jobs:
       - name: Install tree
         run: sudo apt-get update && sudo apt-get install -y tree
 
-      - name: Generate tree
+      - name: Update README with tree
         run: |
-          echo '```' > PROJECT_STRUCTURE.md
-          tree -I 'node_modules|.git|__pycache__|.venv' >> PROJECT_STRUCTURE.md
-          echo '```' >> PROJECT_STRUCTURE.md
+          TREE=$(tree -I 'node_modules|.git|__pycache__|.venv')
+          awk -v tree="$TREE" '
+            /<!-- TREE_START -->/ { print; print "```"; print tree; print "```"; skip=1; next }
+            /<!-- TREE_END -->/ { skip=0 }
+            !skip { print }
+          ' README.md > README.tmp && mv README.tmp README.md
 
       - name: Commit and push if changed
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          git add PROJECT_STRUCTURE.md
+          git add README.md
           git diff --staged --quiet || git commit -m "docs: update project structure tree"
           git push
