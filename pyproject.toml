@@ -71,6 +71,8 @@ dependencies = [
     "langchain_community",
     "ipython>=9.13.0",
     "debugpy>=1.8.21",
+    "ipykernel>=7.3.0",
+    "pygraphviz>=2.0.1",
 ]
 
 [tool.fastapi]
