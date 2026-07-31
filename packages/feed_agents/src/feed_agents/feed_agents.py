@@ -13,10 +13,11 @@ from langgraph.types import Command
 from langchain_core.runnables import RunnableConfig
 import requests
 import uuid
-
+from langgraph.prebuilt import InjectedState
 
 from base_agents import DefaultAgent, make_supervisor_node, MessagesState
-from typing import Callable, Literal
+from typing import Annotated, Callable, Literal
+import operator
 
 # Resolve the project root (two levels up from this file)
 ROOT = Path(__file__).resolve().parents[4]
@@ -46,6 +47,7 @@ class Endpoint(str, Enum):
     """Class to hold API endpoint information"""
 
     health = "/health"
+    url = "/url"
 
 
 class APIHealthEndpoint(BaseModel):
@@ -56,6 +58,15 @@ class APIHealthEndpoint(BaseModel):
     message: str = Field(
         description="Message providing details from the endpoint about API health"
     )
+
+class APISiteEndpoint(BaseModel):
+    """Structured output for API health endpoint check"""
+
+    endpoint: str = Field(description="Endpoint for providing site url data")
+    site: str = Field(
+        description="Site url data to be provided"
+    )
+
 
 
 class RoutingDecision(BaseModel):
@@ -73,6 +84,7 @@ class RoutingDecision(BaseModel):
 class SupervisorState(MessagesState):
     next: Literal["request_team", "search_team", "FINISH"] | None
     current_instruction: str | None
+    search_results: GuessURLOutput
 
 
 search = GoogleSerperAPIWrapper()
@@ -104,7 +116,7 @@ def guess_url(topic: str, sites: list[str]) -> dict:
 
 
 @tool()
-def check_api_health(endpoint: str) -> dict:
+def api_health(endpoint: str) -> dict:
     """Check health of API by making a GET request to input parameter value and returning status"""
     endpoint = build_api_url(Endpoint.health)
     try:
@@ -126,11 +138,27 @@ def check_api_health(endpoint: str) -> dict:
         ).model_dump()
 
 
+@tool()
+def provide_site(state: Annotated[dict, InjectedState]):
+    """Provides the site url data captured from state to API endpoint"""
+    search_results = state["messages"]
+    sites = search_results["sites"][1]
+    endpoint = build_api_url(Endpoint.url)
+    try:
+        response = requests.get(endpoint, data=sites, timeout=5)
+        response.raise_for_status()  # raises HTTPError for 4xx/5xx status codes
+    except Exception as e:
+    # covers connection errors, timeouts, and HTTP errors from raise_for_status
+        print(f"Request to {endpoint} failed: {e}")
+        return None  # or re-raise, or return a default/error value
+
+
+
 def request_team(
     state: SupervisorState, model: str, config: RunnableConfig | None
 ) -> Callable[[SupervisorState], Command[Literal["supervisor"]]]:
-    def api_request_agent(state: SupervisorState) -> Command[Literal["supervisor"]]:
-        tools = [check_api_health]
+    def health_requester(state: SupervisorState) -> Command[Literal["supervisor"]]:
+        tools = [api_health]
         system_prompt = """You are an agent tasked with checking the health of an API. Use the check_api_health tool to make a GET request to the API health endpoint and return the status and message. Ensure that you handle any errors gracefully and provide a clear response."""
         messages = state["messages"]
         last_message = messages[-1]
@@ -142,28 +170,58 @@ def request_team(
             config=config,
             system_prompt=system_prompt,
         ).graph.invoke({"messages": [last_message]}, config=config)
-        api_agent_last = api_agent["messages"][-1]
+        result = api_agent["messages"][-1]
         return Command(
             update={
                 "messages": [
                     AIMessage(
-                        content=f"API request completed successfully. Data: {api_agent_last.model_dump_json()}",
-                        name="api_requester",
+                        content=f"API request completed successfully. Data: {result.model_dump_json()}",
+                        name="health_requester",
                     )
                 ]
             },
             goto="supervisor",
         )
+    def site_requester(state: SupervisorState) -> Command[Literal["supervisor"]]:
+            tools = [provide_site]
+            system_prompt = """You are an agent tasked with providing site url data to API. Use the provide_site tool to make a GET request to the API url endpoint and return the status and message. Ensure that you handle any errors gracefully and provide a clear response."""
+            messages = state["messages"]
+            last_message = messages[-1]
+            api_agent = DefaultAgent(
+                state=state,
+                model=model,
+                tools=tools,
+                schema=APISiteEndpoint,
+                config=config,
+                system_prompt=system_prompt,
+            ).graph.invoke({"messages": [last_message],
+                            "search_results":state.get("search_results")}, config=config)
+            result = api_agent["messages"][-1]
+            return Command(
+                update={
+                    "messages": [
+                        AIMessage(
+                            content=f"API request completed successfully. Data: {result.model_dump_json()}",
+                            name="site_requester",
+                        )
+                    ]
+                },
+                goto="supervisor",
+            )
+    
 
-    agent_roles = ["requester"]  # used to direct supervisor to agent(s)
+    agent_roles = ["health_requester", "site_requester"]  # used to direct supervisor to agent(s)
     supervisor_node = make_supervisor_node(
         init_chat_model(model), agent_roles, config=config
     )
 
     builder = StateGraph(SupervisorState)
     builder.add_node(
-        "requester", api_request_agent
+        "health_requester", health_requester
     )  # agent subgraph node, returns updates to supervisor
+    builder.add_node(
+            "site_requester", site_requester
+        )  # agent subgraph node, returns updates to supervisor
     builder.add_node("supervisor", supervisor_node)
 
     builder.add_edge(START, "supervisor")
@@ -210,15 +268,16 @@ def search_team(
             config=config,
             system_prompt=system_prompt,
         ).graph.invoke({"messages": [last_message]}, config=config)
-        search_agent_last = search_agent["messages"][-1]  # structured output only
+        result = search_agent["messages"][-1]  # structured output only
         return Command(
             update={
                 "messages": [
                     AIMessage(
-                        content=f"Search completed successfully. Data: {search_agent_last.model_dump_json()}",
+                        content=f"Search completed successfully. Data: {result.model_dump()}",
                         name="search",
                     )
-                ]
+                ],
+                "search_results": result.model_dump(),
             },
             goto="supervisor",
         )
@@ -268,18 +327,18 @@ def call_teams(state: SupervisorState):
     config = {"configurable": {"thread_id": thread_id}}
     lead_model = init_chat_model(model=model, temperature=0)
     system_prompt = (
-        "You are the lead supervisor routing between two worker teams:\n"
-        "- 'request_team': checks the health of the API.\n"
-        "- 'search_team': finds relevant sites for a topic and returns full Google "
-        "News search URLs.\n\n"
-        "The user's request may contain multiple sub-tasks. Break it down and, for "
-        "each unfinished sub-task, route to the team that owns it. When you route to "
-        "a team, write a clear, self-contained 'instruction' string containing ONLY "
-        "the sub-task text that team needs — do not include unrelated parts of the "
-        "request. A team's result appears as a message named after that team once it "
-        "has run; do not route to a team whose part is already done. When every "
-        "sub-task has been completed, respond with next=FINISH."
-    )
+    "You are the lead supervisor routing between two worker teams:\n"
+    "- 'request_team': checks API health and provides site urls as data to API.\n"
+    "- 'search_team': finds relevant sites for a topic and returns full Google "
+    "News search URLs.\n\n"
+    "The user's request may contain multiple sub-tasks, and a team may need to "
+    "be called more than once if it owns more than one unfinished sub-task.\n\n"
+    "Before choosing, review the conversation: messages from 'request_team' or "
+    "'search_team' show what that team has already completed. Compare that "
+    "against the full original request to find what's still outstanding.\n\n"
+    "Route to the team that owns the next unfinished piece, with an 'instruction' "
+    "containing only that piece. Respond next='FINISH' only when nothing is left."
+)
     FINISH_TOKEN = "FINISH"
 
     def supervisor_node(
@@ -331,7 +390,7 @@ if __name__ == "__main__":
         state=SupervisorState(
             messages=[
                 HumanMessage(
-                    content=f"Check the health of the API.Provide full URLs prefixed as Google News search queries for relevant sites for {topic}"
+                    content=f"Check the health of the API then provide full URLs prefixed as Google News search queries for relevant sites for {topic}. Finally provide those urls from previous step to the API via provide site tool."
                 )
             ]
         )
