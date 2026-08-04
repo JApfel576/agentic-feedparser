@@ -95,7 +95,7 @@ class SupervisorState(MessagesState):
     subtasks: list[Subtask]
     subtasks_planned: bool  # have we done the initial breakdown?
     _dispatched_id: str
-    search_results: GuessURLOutput
+    search_results: dict | None  # to hold search results for provide_site tool
 
 
 search = GoogleSerperAPIWrapper()
@@ -150,18 +150,18 @@ def api_health(endpoint: str) -> dict:
 
 
 @tool
-def provide_site(state: Annotated[dict, InjectedState]):
+def provide_site(config: RunnableConfig) -> dict:
     """Provides the site url data captured from state to API endpoint"""
-    search_results = state["messages"]
-    sites = search_results["sites"][1]
+    search_results = config["configurable"].get("search_results")
+    sites = search_results["sites"][0]  # Get the first site from the list
     endpoint = build_api_url(Endpoint.url)
     try:
         response = requests.get(endpoint, data=sites, timeout=5)
         response.raise_for_status()  # raises HTTPError for 4xx/5xx status codes
-    except Exception as e:
-        # covers connection errors, timeouts, and HTTP errors from raise_for_status
+        return {"status": "success", "response": response.json()}
+    except Exception as e: # covers connection errors, timeouts, and HTTP errors from raise_for_status
         print(f"Request to {endpoint} failed: {e}")
-        return None  # or re-raise, or return a default/error value
+        return {"status": "error", "message": str(e)}
 
 
 def request_team(
@@ -198,6 +198,15 @@ def request_team(
         system_prompt = """You are an agent tasked with providing site url data to API. Use the provide_site tool to make a GET request to the API url endpoint and return the status and message. Ensure that you handle any errors gracefully and provide a clear response."""
         messages = state["messages"]
         last_message = messages[-1]
+        search_results = state["search_results"]
+
+        inner_config = {
+            **(config or {}),
+            "configurable": {
+                **(config or {}).get("configurable", {}),
+                "search_results": search_results,
+            },
+        } # needs to include search_results for provide_site tool
         api_agent = DefaultAgent(
             state=state,
             model=model,
@@ -206,9 +215,9 @@ def request_team(
             config=config,
             system_prompt=system_prompt,
         ).graph.invoke(
-            {"messages": [last_message], "search_results": state.get("search_results")},
-            config=config,
+            {"messages": [last_message]}, config=inner_config
         )
+        
         result = api_agent["messages"][-1]
         return Command(
             update={
@@ -245,19 +254,19 @@ def request_team(
     app = builder.compile(checkpointer=checkpointer)
 
     def call_request_team(state: SupervisorState) -> Command[Literal["supervisor"]]:
-        instruction = state["current_instruction"]
         inner_config = {
             **(config or {}),
             "configurable": {
                 **(config or {}).get("configurable", {}),
-                "thread_id": str(uuid.uuid4()),
+                "thread_id": str(uuid.uuid4())
             },
         }
         response = app.invoke(
             {
-                "messages": [HumanMessage(content=instruction)]
+                "messages": [HumanMessage(content=state["current_instruction"])],
+                "search_results": state.get("search_results")
             },  # Pass instruction from supervisor to search team
-            config=config,
+            config=inner_config, # needs to include search_results for provide_site tool
         )
         last = response["messages"][-1]
         updated_subtasks = [
@@ -335,7 +344,7 @@ def search_team(
             {
                 "messages": [HumanMessage(content=instruction)]
             },  # Pass instruction from supervisor to search team
-            config=config,
+            config=inner_config,
         )
         last = response["messages"][-1]
         updated_subtasks = [
@@ -346,8 +355,9 @@ def search_team(
         return Command(
             goto="supervisor",
             update={
-                "messages": [AIMessage(content=last.content, name="request_team")],
+                "messages": [AIMessage(content=last.content, name="search_team")],
                 "subtasks": updated_subtasks,
+                "search_results": response.get("search_results"),
             },
         )
 
