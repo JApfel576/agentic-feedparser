@@ -50,6 +50,8 @@ class Endpoint(str, Enum):
 
     health = "/health"
     url = "/url"
+    rss = "/rss"
+    data = "/data"
 
 
 class APIHealthEndpoint(BaseModel):
@@ -108,6 +110,19 @@ def build_api_url(endpoint: Endpoint) -> str:
     return f"{api_host}{endpoint.value}"
 
 
+from urllib.parse import urlparse
+
+
+def normalize_site_operator(raw_site: str) -> str:
+    """Convert a full URL (or bare domain) into a valid Google site: operator value."""
+    if "://" in raw_site:
+        parsed = urlparse(raw_site)
+        domain = parsed.netloc
+        path = parsed.path.rstrip("/")
+        return f"{domain}{path}" if path else domain
+    return raw_site.rstrip("/")
+
+
 @tool
 def relevant_site(topic: str) -> dict:
     """Provide a relevant link for input topic using google serper"""
@@ -124,7 +139,8 @@ def guess_url(topic: str, sites: list[str]) -> dict:
     sites_res = relevant_site.invoke({"topic": topic})
     prefix = "https://news.google.com/search?q="
     full_sites = [f"{prefix}site:{s}" for s in sites_res.get("sites", [])]
-    output = GuessURLOutput(topic=sites_res.get("topic", topic), sites=full_sites)
+    normalized_sites = [normalize_site_operator(s) for s in full_sites]
+    output = GuessURLOutput(topic=sites_res.get("topic", topic), sites=normalized_sites)
     return output.model_dump()
 
 
@@ -154,19 +170,47 @@ def api_health(endpoint: str) -> dict:
 @tool
 def provide_site(config: RunnableConfig) -> dict:
     """Provides the site url data captured from state to API endpoint"""
-    results = config["configurable"].get("search_results",{})
-    sites = results.get("sites",[])
+    results = config["configurable"].get("search_results", {})
+    sites = results.get("sites", [])
     site = sites[0] if sites else None  # Get the first site from the list
-    endpoint = build_api_url(Endpoint.url)
-    try:
-        response = requests.get(endpoint, params={"url_input": site}, timeout=5)
-        response.raise_for_status()  # raises HTTPError for 4xx/5xx status codes
-        return {"status": "success", "response": response.json()}
-    except (
-        Exception
-    ) as e:  # covers connection errors, timeouts, and HTTP errors from raise_for_status
-        print(f"Request to {endpoint} failed: {e}")
-        return {"status": "error", "message": str(e)}
+
+    def make_request(endpoint: str, param_site: str, site: str) -> dict:
+        try:
+            response = requests.get(endpoint, params={param_site: site}, timeout=5)
+            response.raise_for_status()  # raises HTTPError for 4xx/5xx status codes
+            return {"status": "success", "response": response.json()}
+        except Exception as e:  # covers connection errors, timeouts, and HTTP errors from raise_for_status
+            print(f"Request to {endpoint} failed: {e}")
+            return {"status": "error", "message": str(e)}
+
+    def fetch_site_data(site: str) -> dict:
+        validate_url = make_request(
+            endpoint=build_api_url(Endpoint.url), param_site="url_input", site=site
+        )
+        if validate_url.get("status") == "error":
+            return validate_url
+
+        converted_url = make_request(
+            endpoint=build_api_url(Endpoint.rss),
+            param_site="url_input",
+            site=validate_url.get("response"),
+        )
+        if converted_url.get("status") == "error":
+            return converted_url
+
+        # This will use converted_url instead of original site?
+        request_data = make_request(
+            endpoint=build_api_url(Endpoint.data),
+            param_site="url_input",
+            site=converted_url.get("response"),
+        )
+        return request_data
+
+    return (
+        fetch_site_data(site)
+        if site
+        else {"status": "error", "message": "No site provided in search results"}
+    )
 
 
 def request_team(
@@ -268,7 +312,7 @@ def request_team(
         response = app.invoke(
             {
                 "messages": [HumanMessage(content=state["current_instruction"])],
-                "search_results": state.get("search_results",{}),
+                "search_results": state.get("search_results", {}),
             },  # Pass instruction from supervisor to search team
             config=inner_config,
         )
