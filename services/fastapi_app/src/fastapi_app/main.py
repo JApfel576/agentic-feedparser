@@ -48,7 +48,7 @@ def convert_to_rss(url_input: str) -> str:
     """Create url from one given for rss feed"""
     site = Website(url=url_input)
 
-    pattern = r"q=site(\:|%3A)(?:%20|\s)?[a-z0-9.-]+\.com"
+    pattern = r"q=site(\:|%3A)(?:%20|\s)?[a-z0-9.-]+(\.com).*"
     if not re.match(pattern, str(site.url.query)):
         raise ValueError("query not expected format for google news site search")
 
