@@ -21,7 +21,7 @@ class DefaultAgent:
     def __init__(
         self,
         state: MessagesState,
-        model: str,
+        model: BaseChatModel | None,
         tools: list,
         schema: BaseModel,
         config: dict,
@@ -37,9 +37,7 @@ class DefaultAgent:
         self.setup_graph()
         self.checkpointer = MemorySaver()
         self.graph = self.workflow.compile(checkpointer=self.checkpointer)
-
-        self.llm = init_chat_model(model=self.model, temperature=0)
-        self.llm_with_tools = self.llm.bind_tools(tools=self.tools)
+        self.llm_with_tools = self.model.bind_tools(tools=self.tools)
 
     def setup_graph(self):
         self.workflow.add_node("agent", self.call_agent)
@@ -67,7 +65,7 @@ class DefaultAgent:
         messages = state["messages"]
         return {
             "messages": [
-                self.llm.with_structured_output(
+                self.model.with_structured_output(
                     self.schema, strict=True, include_raw=False
                 ).invoke(
                     messages,
