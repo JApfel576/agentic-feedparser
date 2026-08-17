@@ -41,6 +41,7 @@ This approach avoids scraping entire sites unless the metadata indicates the art
 <!-- TREE_START -->
 ```
 .
+├── AGENTS.md
 ├── Dockerfile
 ├── LICENSE
 ├── README.Docker.md
@@ -98,6 +99,6 @@ This approach avoids scraping entire sites unless the metadata indicates the art
             ├── 20260515_183846.json
             └── state.json
 
-22 directories, 35 files
+22 directories, 36 files
 ```
 <!-- TREE_END -->
