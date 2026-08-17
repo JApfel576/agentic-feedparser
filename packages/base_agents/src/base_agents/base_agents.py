@@ -1,7 +1,7 @@
 from langchain.chat_models import init_chat_model, BaseChatModel
 from langgraph.graph import StateGraph, START, END
 from langgraph.checkpoint.memory import MemorySaver
-from langchain.messages import AnyMessage, SystemMessage
+from langchain.messages import AnyMessage, HumanMessage, SystemMessage
 from typing_extensions import TypedDict
 from typing import Annotated, Literal
 from collections.abc import Callable
@@ -15,13 +15,14 @@ from langgraph.types import Command
 class MessagesState(TypedDict):
     messages: Annotated[list[AnyMessage], operator.add]
     next: str  # last-value-wins routing signal written by make_supervisor_node
+    current_instruction: str | None
 
 
 class DefaultAgent:
     def __init__(
         self,
         state: MessagesState,
-        model: str,
+        model: BaseChatModel | None,
         tools: list,
         schema: BaseModel,
         config: dict,
@@ -37,9 +38,7 @@ class DefaultAgent:
         self.setup_graph()
         self.checkpointer = MemorySaver()
         self.graph = self.workflow.compile(checkpointer=self.checkpointer)
-
-        self.llm = init_chat_model(model=self.model, temperature=0)
-        self.llm_with_tools = self.llm.bind_tools(tools=self.tools)
+        self.llm_with_tools = self.model.bind_tools(tools=self.tools)
 
     def setup_graph(self):
         self.workflow.add_node("agent", self.call_agent)
@@ -67,7 +66,7 @@ class DefaultAgent:
         messages = state["messages"]
         return {
             "messages": [
-                self.llm.with_structured_output(
+                self.model.with_structured_output(
                     self.schema, strict=True, include_raw=False
                 ).invoke(
                     messages,
@@ -99,8 +98,21 @@ def make_supervisor_node(
         )  # type: ignore
 
     def supervisor_node(state: MessagesState) -> Command[str]:
-        messages = [SystemMessage(content=system_prompt)] + state["messages"]
-        response = llm.with_structured_output(Router).invoke(messages, config=config)
+        instruction = state.get("current_instruction")
+        if not instruction:
+            raise ValueError(
+            "supervisor_node requires current_instruction in state — "
+            "got none. Check that the dispatching graph sets it before entering this subgraph."
+        )
+        print("INNER SUPERVISOR:", state.get("dispatched_agents_run"), state.get("search_results"))
+        run_so_far = state.get("dispatched_agents_run", [])
+        remaining = [m for m in members if m not in run_so_far]
+        if not remaining:
+            return Command(goto="__end__", update={"next": "FINISH"})
+
+        scoped_messages = [SystemMessage(content=system_prompt),
+                           HumanMessage(content=instruction)]
+        response = llm.with_structured_output(Router).invoke(scoped_messages, config=config)
         choice = response.next
         if choice == "FINISH":
             goto = "__end__"

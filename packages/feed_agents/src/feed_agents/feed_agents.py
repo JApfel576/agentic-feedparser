@@ -4,16 +4,15 @@ from dotenv import load_dotenv
 import os
 from langchain.tools import tool
 from langchain.chat_models import init_chat_model
-from langgraph.graph import StateGraph, START
+from langgraph.graph import END, StateGraph, START
 from langgraph.checkpoint.memory import MemorySaver
 from langchain.messages import HumanMessage, AIMessage, SystemMessage
 from langchain_community.utilities import GoogleSerperAPIWrapper
 from pydantic import BaseModel, Field
-from langgraph.types import Command
+from langgraph.types import Command, interrupt
 from langchain_core.runnables import RunnableConfig
 import requests
 import uuid
-from langgraph.prebuilt import InjectedState
 
 from base_agents import DefaultAgent, make_supervisor_node, MessagesState
 from typing import Annotated, Callable, Literal, TypedDict
@@ -73,7 +72,7 @@ class APISiteEndpoint(BaseModel):
 
 class Subtask(TypedDict):
     id: str
-    team: Literal["request_team", "search_team"]
+    team: Literal["request_team", "search_team", "mark_subtask_complete"]
     instruction: str
     status: Literal["pending", "completed"]
 
@@ -90,12 +89,13 @@ class SubtaskPlan(BaseModel):
     """Initial decomposition of the user's request into subtasks."""
 
     subtasks: list[Subtask] = Field(
-        description="Each item: {'team': 'request_team'|'search_team', 'instruction': str}"
+        description="Each item: {'team': 'request_team'|'search_team'|'mark_subtask_complete', 'instruction': str}"
     )
 
 
 class SupervisorState(MessagesState):
     current_instruction: str | None
+    dispatched_agents_run: list[str]
     subtasks: list[Subtask]
     subtasks_planned: bool  # have we done the initial breakdown?
     _dispatched_id: str
@@ -219,8 +219,8 @@ def request_team(
     def health_requester(state: SupervisorState) -> Command[Literal["supervisor"]]:
         tools = [api_health]
         system_prompt = """You are an agent tasked with checking the health of an API. Use the check_api_health tool to make a GET request to the API health endpoint and return the status and message. Ensure that you handle any errors gracefully and provide a clear response."""
-        messages = state["messages"]
-        last_message = messages[-1]
+        instruction = state["current_instruction"]
+
         api_agent = DefaultAgent(
             state=state,
             model=model,
@@ -228,7 +228,7 @@ def request_team(
             schema=APIHealthEndpoint,
             config=config,
             system_prompt=system_prompt,
-        ).graph.invoke({"messages": [last_message]}, config=config)
+        ).graph.invoke({"messages": [instruction]}, config=config)
         result = api_agent["messages"][-1]
         return Command(
             update={
@@ -237,7 +237,9 @@ def request_team(
                         content=f"API request completed successfully. Data: {result.model_dump_json()}",
                         name="health_requester",
                     )
-                ]
+                ],
+                "dispatched_agents_run": state.get("dispatched_agents_run", [])
+                + ["health_requester"],
             },
             goto="supervisor",
         )
@@ -245,25 +247,17 @@ def request_team(
     def site_requester(state: SupervisorState) -> Command[Literal["supervisor"]]:
         tools = [provide_site]
         system_prompt = """You are an agent tasked with providing site url data to API. Use the provide_site tool to make a GET request to the API url endpoint and return the status and message. Ensure that you handle any errors gracefully and provide a clear response."""
-        messages = state["messages"]
-        last_message = messages[-1]
+        instruction = state["current_instruction"]
         search_results = state.get("search_results", {})
 
-        inner_config = {
-            **(config or {}),
-            "configurable": {
-                **(config or {}).get("configurable", {}),
-                "search_results": search_results,
-            },
-        }  # needs to include search_results for provide_site tool
         api_agent = DefaultAgent(
             state=state,
             model=model,
             tools=tools,
             schema=APISiteEndpoint,
-            config=inner_config,
+            config=config,
             system_prompt=system_prompt,
-        ).graph.invoke({"messages": [last_message]}, config=inner_config)
+        ).graph.invoke({"messages": [instruction]}, config=config)
 
         result = api_agent["messages"][-1]
         return Command(
@@ -273,7 +267,9 @@ def request_team(
                         content=f"API request completed successfully. Data: {result.model_dump_json()}",
                         name="site_requester",
                     )
-                ]
+                ],
+                "dispatched_agents_run": state.get("dispatched_agents_run", [])
+                + ["site_requester"],
             },
             goto="supervisor",
         )
@@ -282,9 +278,7 @@ def request_team(
         "health_requester",
         "site_requester",
     ]  # used to direct supervisor to agent(s)
-    supervisor_node = make_supervisor_node(
-        init_chat_model(model), agent_roles, config=config
-    )
+    supervisor_node = make_supervisor_node(model, agent_roles, config=config)
 
     builder = StateGraph(SupervisorState)
     builder.add_node(
@@ -295,42 +289,8 @@ def request_team(
     )  # agent subgraph node, returns updates to supervisor
     builder.add_node("supervisor", supervisor_node)
 
-    builder.add_edge(START, "supervisor")
-
-    checkpointer = MemorySaver()
-    app = builder.compile(checkpointer=checkpointer)
-
-    def call_request_team(state: SupervisorState) -> Command[Literal["supervisor"]]:
-        inner_config = {
-            **(config or {}),
-            "configurable": {
-                **(config or {}).get("configurable", {}),
-                "thread_id": str(uuid.uuid4()),
-            },
-        }
-
-        response = app.invoke(
-            {
-                "messages": [HumanMessage(content=state["current_instruction"])],
-                "search_results": state.get("search_results", {}),
-            },  # Pass instruction from supervisor to search team
-            config=inner_config,
-        )
-        last = response["messages"][-1]
-        updated_subtasks = [
-            {**s, "status": "completed"} if s["id"] == state["_dispatched_id"] else s
-            for s in state["subtasks"]
-        ]
-
-        return Command(
-            goto="supervisor",
-            update={
-                "messages": [AIMessage(content=last.content, name="request_team")],
-                "subtasks": updated_subtasks,
-            },
-        )
-
-    return call_request_team
+    builder.set_entry_point("supervisor")
+    return builder.compile()
 
 
 def search_team(
@@ -339,8 +299,7 @@ def search_team(
     def search_agent(state: SupervisorState) -> Command[Literal["supervisor"]]:
         tools = [relevant_site, guess_url]
         system_prompt = """You are a search agent tasked with finding relevant sites for a given topic. Use the relevant_site and guess_url tools to provide full URLs prefixed as Google News search queries."""
-        messages = state["messages"]
-        last_message = messages[-1]
+        instruction = state["current_instruction"]
         search_agent = DefaultAgent(
             state=state,
             model=model,
@@ -348,7 +307,7 @@ def search_team(
             schema=GuessURLOutput,
             config=config,
             system_prompt=system_prompt,
-        ).graph.invoke({"messages": [last_message]}, config=config)
+        ).graph.invoke({"messages": [instruction]}, config=config)
         result = search_agent["messages"][-1]  # structured output only
         return Command(
             update={
@@ -359,64 +318,57 @@ def search_team(
                     )
                 ],
                 "search_results": result.model_dump(),
+                "dispatched_agents_run": state.get("dispatched_agents_run", [])
+                + ["searcher"],
             },
-            goto="supervisor",
+            goto="human_approval",
         )
 
-    agent_roles = ["searcher"]  # used to direct supervisor to agent(s)
+    def human_approval(
+        state: SupervisorState,
+    ) -> Command[Literal["supervisor", "searcher"]]:
+        print(
+            "HUMAN_APPROVAL ENTERED, dispatched_agents_run:",
+            state.get("dispatched_agents_run"),
+        )
+        response = interrupt(
+            {
+                "question": "Do you approve the search results? (yes/no)",
+                "search_results": state.get("search_results", {}),
+            }
+        )
+        is_approved = str(response).strip().lower() in ("yes", "y", "true", "1")
+        return Command(
+            update={
+                "dispatched_agents_run": state.get("dispatched_agents_run", [])
+                + ["human_approval"]
+            },
+            goto="supervisor" if is_approved else "searcher",
+        )
+
+    agent_roles = [
+        "searcher",
+        "human_approval",
+    ]  # used to direct supervisor to agent(s)
     supervisor_node = make_supervisor_node(
-        init_chat_model(model), agent_roles, config=config
+        model,
+        agent_roles,
+        config=config,
+        additional_instructions="After search results are returned, ask for human approval before proceeding to the next step.",
     )
 
     builder = StateGraph(SupervisorState)
     builder.add_node(
         "searcher", search_agent
     )  # agent subgraph node, returns updates to supervisor
+    builder.add_node("human_approval", human_approval)
     builder.add_node("supervisor", supervisor_node)
-
     builder.set_entry_point("supervisor")
-
-    checkpointer = MemorySaver()
-    app = builder.compile(checkpointer=checkpointer)
-
-    def call_search_team(state: SupervisorState) -> Command[Literal["supervisor"]]:
-        instruction = state["current_instruction"]
-        inner_config = {
-            **(config or {}),
-            "configurable": {
-                **(config or {}).get("configurable", {}),
-                "thread_id": str(uuid.uuid4()),
-            },
-        }
-        response = app.invoke(
-            {
-                "messages": [HumanMessage(content=instruction)]
-            },  # Pass instruction from supervisor to search team
-            config=inner_config,
-        )
-        last = response["messages"][-1]
-        updated_subtasks = [
-            {**s, "status": "completed"} if s["id"] == state["_dispatched_id"] else s
-            for s in state["subtasks"]
-        ]
-
-        return Command(
-            goto="supervisor",
-            update={
-                "messages": [AIMessage(content=last.content, name="search_team")],
-                "subtasks": updated_subtasks,
-                "search_results": response.get("search_results"),
-            },
-        )
-
-    return call_search_team
+    return builder.compile()
 
 
-def call_teams(state: SupervisorState):
-    thread_id = str(uuid.uuid4())
-    model = "openai:gpt-5.4-mini"
-    config = {"configurable": {"thread_id": thread_id}}
-    lead_model = init_chat_model(model=model, temperature=0)
+def build_top_graph(model_str, config):
+    model = init_chat_model(model_str, temperature=0)
     PLAN_PROMPT = (
         "Break the user's request into independent subtasks. Each subtask goes to "
         "exactly one team:\n"
@@ -435,6 +387,13 @@ def call_teams(state: SupervisorState):
 
     FINISH_TOKEN = "FINISH"
 
+    def mark_subtask_complete(state: SupervisorState) -> Command[Literal["supervisor"]]:
+        updated = [
+            {**s, "status": "completed"} if s["id"] == state["_dispatched_id"] else s
+            for s in state["subtasks"]
+        ]
+        return Command(goto="supervisor", update={"subtasks": updated})
+
     def supervisor_node(
         state: SupervisorState, config: RunnableConfig
     ) -> Command[Literal["request_team", "search_team", "__end__"]]:
@@ -442,7 +401,7 @@ def call_teams(state: SupervisorState):
         if not state.get("subtasks_planned"):
             messages = [SystemMessage(content=PLAN_PROMPT)] + state["messages"]
 
-            plan = lead_model.with_structured_output(SubtaskPlan).invoke(
+            plan = model.with_structured_output(SubtaskPlan).invoke(
                 messages, config=config
             )
             subtasks: list[Subtask] = [
@@ -489,7 +448,7 @@ def call_teams(state: SupervisorState):
                 f"- id={s['id']} team={s['team']} instruction={s['instruction']!r}"
                 for s in dispatchable
             )
-            decision = lead_model.with_structured_output(RoutingDecision).invoke(
+            decision = model.with_structured_output(RoutingDecision).invoke(
                 [SystemMessage(content=ROUTE_PROMPT + "\n\n" + listing)],
                 config=config,
             )
@@ -498,23 +457,6 @@ def call_teams(state: SupervisorState):
             chosen = next(
                 s for s in dispatchable if s["id"] == decision.next_subtask_id
             )
-
-            # Deterministic fallback: if there's only one pending, skip the LLM call
-        if len(pending) == 1:
-            chosen = pending[0]
-        else:
-            messages = [SystemMessage(content=ROUTE_PROMPT)] + state["messages"]
-            listing = "\n".join(
-                f"- id={s['id']} team={s['team']} instruction={s['instruction']!r}"
-                for s in pending
-            )
-            decision = lead_model.with_structured_output(RoutingDecision).invoke(
-                [SystemMessage(content=ROUTE_PROMPT + "\n\n" + listing)],
-                config=config,
-            )
-            if decision.next_subtask_id == FINISH_TOKEN:
-                return Command(goto="__end__", update={"next": FINISH_TOKEN})
-            chosen = next(s for s in pending if s["id"] == decision.next_subtask_id)
 
         return Command(
             goto=chosen["team"],
@@ -531,35 +473,58 @@ def call_teams(state: SupervisorState):
     builder.add_node("supervisor", supervisor_node)
     builder.add_node(
         "request_team",
-        request_team(state=state, model=model, config=config),
+        request_team(state=None, model=model, config=config),
     )
     builder.add_node(
         "search_team",
-        search_team(state=state, model=model, config=config),
+        search_team(state=None, model=model, config=config),
     )
+    builder.add_node("mark_subtask_complete", mark_subtask_complete)
 
     builder.set_entry_point("supervisor")
+    builder.add_edge("search_team", "mark_subtask_complete")
+    builder.add_edge(
+        "request_team", "mark_subtask_complete"
+    )  # request_team needs this too
+    builder.add_edge("mark_subtask_complete", "supervisor")
 
     checkpointer = MemorySaver()
-    app = builder.compile(checkpointer=checkpointer)
-
-    messages = app.invoke(
-        {"messages": state["messages"]},
-        config=config,
-    )
-
-    for m in messages["messages"]:
-        m.pretty_print()
+    return builder.compile(checkpointer=checkpointer)
 
 
 if __name__ == "__main__":
     topic = "latest reliable news source affecting stock market"
-    call_teams(
-        state=SupervisorState(
-            messages=[
+    config = {"configurable": {"thread_id": str(uuid.uuid4())}}
+    graph = build_top_graph(model_str="openai:gpt-5.4-mini", config=config)
+
+    result = graph.invoke(
+        {
+            "messages": [
                 HumanMessage(
                     content=f"Check the health of the API then provide full URLs prefixed as Google News search queries for relevant sites for {topic}. Finally provide those urls from previous step to the API via provide site tool."
                 )
             ]
-        )
+        },
+        config=config,
     )
+
+    while "__interrupt__" in result:
+        payload = result["__interrupt__"][0].value
+        print(payload["question"], payload["search_results"])
+        answer = input("yes/no: ")
+        result = graph.invoke(Command(resume=answer), config=config)
+
+    print(result)
+
+    # for event in graph.stream(input):
+    #     print(event)
+
+    # call_teams(
+    #     state=SupervisorState(
+    #         messages=[
+    #             HumanMessage(
+    #                 content=f"Check the health of the API then provide full URLs prefixed as Google News search queries for relevant sites for {topic}. Finally provide those urls from previous step to the API via provide site tool."
+    #             )
+    #         ]
+    #     )
+    # )
