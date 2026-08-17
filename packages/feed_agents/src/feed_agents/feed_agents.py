@@ -95,6 +95,7 @@ class SubtaskPlan(BaseModel):
 
 class SupervisorState(MessagesState):
     current_instruction: str | None
+    dispatched_agents_run: list[str]
     subtasks: list[Subtask]
     subtasks_planned: bool  # have we done the initial breakdown?
     _dispatched_id: str
@@ -236,7 +237,9 @@ def request_team(
                         content=f"API request completed successfully. Data: {result.model_dump_json()}",
                         name="health_requester",
                     )
-                ]
+                ],
+                "dispatched_agents_run": state.get("dispatched_agents_run", [])
+                + ["health_requester"],
             },
             goto="supervisor",
         )
@@ -247,21 +250,14 @@ def request_team(
         instruction = state["current_instruction"]
         search_results = state.get("search_results", {})
 
-        inner_config = {
-            **(config or {}),
-            "configurable": {
-                **(config or {}).get("configurable", {}),
-                "search_results": search_results,
-            },
-        }  # needs to include search_results for provide_site tool
         api_agent = DefaultAgent(
             state=state,
             model=model,
             tools=tools,
             schema=APISiteEndpoint,
-            config=inner_config,
+            config=config,
             system_prompt=system_prompt,
-        ).graph.invoke({"messages": [instruction]}, config=inner_config)
+        ).graph.invoke({"messages": [instruction]}, config=config)
 
         result = api_agent["messages"][-1]
         return Command(
@@ -271,7 +267,9 @@ def request_team(
                         content=f"API request completed successfully. Data: {result.model_dump_json()}",
                         name="site_requester",
                     )
-                ]
+                ],
+                "dispatched_agents_run": state.get("dispatched_agents_run", [])
+                + ["site_requester"],
             },
             goto="supervisor",
         )
@@ -280,9 +278,7 @@ def request_team(
         "health_requester",
         "site_requester",
     ]  # used to direct supervisor to agent(s)
-    supervisor_node = make_supervisor_node(
-        model, agent_roles, config=config
-    )
+    supervisor_node = make_supervisor_node(model, agent_roles, config=config)
 
     builder = StateGraph(SupervisorState)
     builder.add_node(
@@ -322,25 +318,44 @@ def search_team(
                     )
                 ],
                 "search_results": result.model_dump(),
+                "dispatched_agents_run": state.get("dispatched_agents_run", [])
+                + ["searcher"],
             },
             goto="human_approval",
         )
 
-
-    def human_approval(state: SupervisorState) -> Command[Literal["supervisor","searcher"]]:
+    def human_approval(
+        state: SupervisorState,
+    ) -> Command[Literal["supervisor", "searcher"]]:
+        print(
+            "HUMAN_APPROVAL ENTERED, dispatched_agents_run:",
+            state.get("dispatched_agents_run"),
+        )
         response = interrupt(
-            {"question":"Do you approve the search results? (yes/no)",
-             "search_results":state.get("search_results", {})
-             }
+            {
+                "question": "Do you approve the search results? (yes/no)",
+                "search_results": state.get("search_results", {}),
+            }
         )
         is_approved = str(response).strip().lower() in ("yes", "y", "true", "1")
-        return Command(goto="__end__" if is_approved else "searcher")
+        return Command(
+            update={
+                "dispatched_agents_run": state.get("dispatched_agents_run", [])
+                + ["human_approval"]
+            },
+            goto="supervisor" if is_approved else "searcher",
+        )
 
-    
-    agent_roles = ["searcher", "human_approval"]  # used to direct supervisor to agent(s)
+    agent_roles = [
+        "searcher",
+        "human_approval",
+    ]  # used to direct supervisor to agent(s)
     supervisor_node = make_supervisor_node(
-        model, agent_roles, config=config
-    , additional_instructions="After search results are returned, ask for human approval before proceeding to the next step.")
+        model,
+        agent_roles,
+        config=config,
+        additional_instructions="After search results are returned, ask for human approval before proceeding to the next step.",
+    )
 
     builder = StateGraph(SupervisorState)
     builder.add_node(
@@ -371,6 +386,7 @@ def build_top_graph(model_str, config):
     )
 
     FINISH_TOKEN = "FINISH"
+
     def mark_subtask_complete(state: SupervisorState) -> Command[Literal["supervisor"]]:
         updated = [
             {**s, "status": "completed"} if s["id"] == state["_dispatched_id"] else s
@@ -466,6 +482,12 @@ def build_top_graph(model_str, config):
     builder.add_node("mark_subtask_complete", mark_subtask_complete)
 
     builder.set_entry_point("supervisor")
+    builder.add_edge("search_team", "mark_subtask_complete")
+    builder.add_edge(
+        "request_team", "mark_subtask_complete"
+    )  # request_team needs this too
+    builder.add_edge("mark_subtask_complete", "supervisor")
+
     checkpointer = MemorySaver()
     return builder.compile(checkpointer=checkpointer)
 
@@ -476,10 +498,15 @@ if __name__ == "__main__":
     graph = build_top_graph(model_str="openai:gpt-5.4-mini", config=config)
 
     result = graph.invoke(
-        {"messages":[HumanMessage(
-                        content=f"Check the health of the API then provide full URLs prefixed as Google News search queries for relevant sites for {topic}. Finally provide those urls from previous step to the API via provide site tool."
-                    )]}
-                    , config=config)
+        {
+            "messages": [
+                HumanMessage(
+                    content=f"Check the health of the API then provide full URLs prefixed as Google News search queries for relevant sites for {topic}. Finally provide those urls from previous step to the API via provide site tool."
+                )
+            ]
+        },
+        config=config,
+    )
 
     while "__interrupt__" in result:
         payload = result["__interrupt__"][0].value
