@@ -72,7 +72,7 @@ class APISiteEndpoint(BaseModel):
 
 class Subtask(TypedDict):
     id: str
-    team: Literal["request_team", "search_team", "mark_subtask_complete"]
+    team: Literal["request_team", "search_team"]
     instruction: str
     status: Literal["pending", "completed"]
 
@@ -89,7 +89,7 @@ class SubtaskPlan(BaseModel):
     """Initial decomposition of the user's request into subtasks."""
 
     subtasks: list[Subtask] = Field(
-        description="Each item: {'team': 'request_team'|'search_team'|'mark_subtask_complete', 'instruction': str}"
+        description="Each item: {'team': 'request_team'|'search_team', 'instruction': str}"
     )
 
 
@@ -100,10 +100,12 @@ class SupervisorState(MessagesState):
     subtasks_planned: bool  # have we done the initial breakdown?
     _dispatched_id: str
     search_results: dict | None  # to hold search results for provide_site tool
+    approval_attempts: int  # caps the human_approval -> searcher retry cycle
 
 
 search = GoogleSerperAPIWrapper()
 api_host = "http://127.0.0.1:8000"
+MAX_APPROVAL_ATTEMPTS = 3  # how many times human_approval may bounce back to searcher
 
 
 def build_api_url(endpoint: Endpoint) -> str:
@@ -168,11 +170,11 @@ def api_health(endpoint: str) -> dict:
 
 
 @tool
-def provide_site(config: RunnableConfig) -> dict:
-    """Provides the site url data captured from state to API endpoint"""
-    results = config["configurable"].get("search_results", {})
-    sites = results.get("sites", [])
-    site = sites[0] if sites else None  # Get the first site from the list
+def provide_site(site: str) -> dict:
+    """Provides the given site url to the API endpoints (validate -> rss -> data).
+
+    `site` must be a full URL; the caller supplies it from the earlier search step.
+    """
 
     def make_request(endpoint: str, param_site: str, site: str) -> dict:
         try:
@@ -209,7 +211,7 @@ def provide_site(config: RunnableConfig) -> dict:
     return (
         fetch_site_data(site)
         if site
-        else {"status": "error", "message": "No site provided in search results"}
+        else {"status": "error", "message": "No site provided"}
     )
 
 
@@ -247,8 +249,17 @@ def request_team(
     def site_requester(state: SupervisorState) -> Command[Literal["supervisor"]]:
         tools = [provide_site]
         system_prompt = """You are an agent tasked with providing site url data to API. Use the provide_site tool to make a GET request to the API url endpoint and return the status and message. Ensure that you handle any errors gracefully and provide a clear response."""
+        # The site lives in graph state, not in config — hand it to the agent in the
+        # instruction so the provide_site tool receives it as an argument.
+        sites = (state.get("search_results") or {}).get("sites", [])
         instruction = state["current_instruction"]
-        search_results = state.get("search_results", {})
+        if sites:
+            instruction = f"{instruction}\n\nUse this site url: {sites[0]}"
+        else:
+            instruction = (
+                f"{instruction}\n\nNo site url is available from the search step — "
+                "report this as an error instead of calling provide_site."
+            )
 
         api_agent = DefaultAgent(
             state=state,
@@ -278,7 +289,9 @@ def request_team(
         "health_requester",
         "site_requester",
     ]  # used to direct supervisor to agent(s)
-    supervisor_node = make_supervisor_node(model, agent_roles, config=config)
+    supervisor_node = make_supervisor_node(
+        model, agent_roles, config=config, team_name="request_team"
+    )
 
     builder = StateGraph(SupervisorState)
     builder.add_node(
@@ -297,6 +310,8 @@ def search_team(
     state: SupervisorState, model: str, config: RunnableConfig | None
 ) -> Callable[[SupervisorState], Command[Literal["supervisor"]]]:
     def search_agent(state: SupervisorState) -> Command[Literal["supervisor"]]:
+        print("SEARCH_AGENT ENTERED, dispatched_agents_run:",
+            state.get("dispatched_agents_run"))
         tools = [relevant_site, guess_url]
         system_prompt = """You are a search agent tasked with finding relevant sites for a given topic. Use the relevant_site and guess_url tools to provide full URLs prefixed as Google News search queries."""
         instruction = state["current_instruction"]
@@ -327,34 +342,50 @@ def search_team(
     def human_approval(
         state: SupervisorState,
     ) -> Command[Literal["supervisor", "searcher"]]:
+        attempts = (state.get("approval_attempts") or 0) + 1
         print(
-            "HUMAN_APPROVAL ENTERED, dispatched_agents_run:",
+            f"HUMAN_APPROVAL ENTERED attempt={attempts}, dispatched_agents_run:",
             state.get("dispatched_agents_run"),
         )
         response = interrupt(
             {
                 "question": "Do you approve the search results? (yes/no)",
                 "search_results": state.get("search_results", {}),
+                "attempt": attempts,
+                "max_attempts": MAX_APPROVAL_ATTEMPTS,
             }
         )
         is_approved = str(response).strip().lower() in ("yes", "y", "true", "1")
-        return Command(
-            update={
-                "dispatched_agents_run": state.get("dispatched_agents_run", [])
-                + ["human_approval"]
-            },
-            goto="supervisor" if is_approved else "searcher",
-        )
+        update = {
+            "dispatched_agents_run": state.get("dispatched_agents_run", [])
+            + ["human_approval"],
+            "approval_attempts": attempts,
+        }
+        if is_approved:
+            return Command(update=update, goto="supervisor")
+        if attempts >= MAX_APPROVAL_ATTEMPTS:
+            # Bound the reject cycle: without this, searcher <-> human_approval never settles.
+            update["messages"] = [
+                AIMessage(
+                    content=(
+                        f"Search results were not approved after {attempts} attempts; "
+                        "giving up on re-running the search."
+                    ),
+                    name="human_approval",
+                )
+            ]
+            return Command(update=update, goto="supervisor")
+        return Command(update=update, goto="searcher")
 
-    agent_roles = [
-        "searcher",
-        "human_approval",
-    ]  # used to direct supervisor to agent(s)
+    # human_approval is reached by an explicit goto from searcher, not by supervisor routing,
+    # so it must not appear in the roster the supervisor picks from.
+    agent_roles = ["searcher"]  # used to direct supervisor to agent(s)
     supervisor_node = make_supervisor_node(
         model,
         agent_roles,
         config=config,
         additional_instructions="After search results are returned, ask for human approval before proceeding to the next step.",
+        team_name="search_team",
     )
 
     builder = StateGraph(SupervisorState)
@@ -368,7 +399,7 @@ def search_team(
 
 
 def build_top_graph(model_str, config):
-    model = init_chat_model(model_str, temperature=0)
+    model = init_chat_model(model_str, temperature=0, max_retries=3, timeout=30)
     PLAN_PROMPT = (
         "Break the user's request into independent subtasks. Each subtask goes to "
         "exactly one team:\n"
@@ -494,19 +525,26 @@ def build_top_graph(model_str, config):
 
 if __name__ == "__main__":
     topic = "latest reliable news source affecting stock market"
-    config = {"configurable": {"thread_id": str(uuid.uuid4())}}
+    # recursion_limit kept low so a routing regression surfaces immediately instead of
+    # burning 25 supersteps of LLM calls.
+    config = {"configurable": {"thread_id": str(uuid.uuid4())}, "recursion_limit": 12}
     graph = build_top_graph(model_str="openai:gpt-5.4-mini", config=config)
 
-    result = graph.invoke(
-        {
-            "messages": [
-                HumanMessage(
-                    content=f"Check the health of the API then provide full URLs prefixed as Google News search queries for relevant sites for {topic}. Finally provide those urls from previous step to the API via provide site tool."
-                )
-            ]
-        },
-        config=config,
-    )
+    try:
+        result = graph.invoke(
+            {
+                "messages": [
+                    HumanMessage(
+                        content=f"Check the health of the API then provide full URLs prefixed as Google News search queries for relevant sites for {topic}. Finally provide those urls from previous step to the API via provide site tool."
+                    )
+                ]
+            },
+            config=config,
+        )
+    except Exception:
+        import traceback
+        traceback.print_exc()
+        raise
 
     while "__interrupt__" in result:
         payload = result["__interrupt__"][0].value
@@ -515,16 +553,3 @@ if __name__ == "__main__":
         result = graph.invoke(Command(resume=answer), config=config)
 
     print(result)
-
-    # for event in graph.stream(input):
-    #     print(event)
-
-    # call_teams(
-    #     state=SupervisorState(
-    #         messages=[
-    #             HumanMessage(
-    #                 content=f"Check the health of the API then provide full URLs prefixed as Google News search queries for relevant sites for {topic}. Finally provide those urls from previous step to the API via provide site tool."
-    #             )
-    #         ]
-    #     )
-    # )
