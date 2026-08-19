@@ -1,7 +1,7 @@
 from langchain.chat_models import init_chat_model, BaseChatModel
 from langgraph.graph import StateGraph, START, END
 from langgraph.checkpoint.memory import MemorySaver
-from langchain.messages import AnyMessage, HumanMessage, SystemMessage
+from langchain.messages import AnyMessage, AIMessage, HumanMessage, SystemMessage
 from typing_extensions import TypedDict
 from typing import Annotated, Literal
 from collections.abc import Callable
@@ -16,6 +16,12 @@ class MessagesState(TypedDict):
     messages: Annotated[list[AnyMessage], operator.add]
     next: str  # last-value-wins routing signal written by make_supervisor_node
     current_instruction: str | None
+    supervisor_turns: dict[str, int]  # per-team supervisor turn counter, keyed by team
+    # supervisor_node is annotated `state: MessagesState`, and LangGraph uses that annotation
+    # as the node's input schema — any key absent here is filtered out of the state the node
+    # sees. dispatched_agents_run MUST be declared here or the supervisor reads it as empty
+    # every turn and its "all members have run" exit condition can never fire.
+    dispatched_agents_run: list[str]
 
 
 class DefaultAgent:
@@ -36,8 +42,8 @@ class DefaultAgent:
 
         self.workflow = StateGraph(MessagesState)
         self.setup_graph()
-        self.checkpointer = MemorySaver()
-        self.graph = self.workflow.compile(checkpointer=self.checkpointer)
+        # self.checkpointer = MemorySaver()
+        self.graph = self.workflow.compile() #checkpointer=self.checkpointer
         self.llm_with_tools = self.model.bind_tools(tools=self.tools)
 
     def setup_graph(self):
@@ -81,21 +87,32 @@ def make_supervisor_node(
     members: list[str],
     config: dict,
     additional_instructions: str = "",
+    team_name: str = "",
 ) -> Callable[[MessagesState], Command[str]]:
-    options = ["FINISH"] + members
-    options_str = ",".join(options)
+    options_str = ",".join(["FINISH"] + members)
     default_prompt = f"You are a supervisor tasked with managing a conversation between the following workers: {options_str}. Given the following user request, respond with the worker to act next. Each worker will perform a task and respond with their results and status. When finished, respond with FINISH."
     if additional_instructions:
         system_prompt = f"{default_prompt}\n\nAdditional instructions: {additional_instructions.strip()}"
     else:
         system_prompt = default_prompt
 
-    class Router(BaseModel):
-        """Worker to route to next. If no workers needed route to FINISH"""
+    # `dispatched_agents_run` is a channel shared by every team in the parent graph, so the
+    # turn counter has to be namespaced or one team's dispatches would exhaust another's budget.
+    turns_key = team_name or ",".join(members)
+    max_turns = len(members) + 1
 
-        next: Literal[tuple(options)] = Field(
-            description=f"Next worker to route to. Options: {options_str}"
-        )  # type: ignore
+    def _router_for(choices: list[str]) -> type[BaseModel]:
+        """Router restricted to the workers that have not run yet — re-picking a
+        completed worker is then structurally impossible, not merely discouraged."""
+
+        class Router(BaseModel):
+            """Worker to route to next. If no workers needed route to FINISH"""
+
+            next: Literal[tuple(choices)] = Field(
+                description=f"Next worker to route to. Options: {','.join(choices)}"
+            )  # type: ignore
+
+        return Router
 
     def supervisor_node(state: MessagesState) -> Command[str]:
         instruction = state.get("current_instruction")
@@ -104,20 +121,64 @@ def make_supervisor_node(
             "supervisor_node requires current_instruction in state — "
             "got none. Check that the dispatching graph sets it before entering this subgraph."
         )
-        print("INNER SUPERVISOR:", state.get("dispatched_agents_run"), state.get("search_results"))
-        run_so_far = state.get("dispatched_agents_run", [])
+        # Filter to this team's roster: the parent-level list also carries other teams' workers.
+        run_so_far = [
+            m for m in (state.get("dispatched_agents_run") or []) if m in members
+        ]
         remaining = [m for m in members if m not in run_so_far]
-        if not remaining:
-            return Command(goto="__end__", update={"next": "FINISH"})
 
-        scoped_messages = [SystemMessage(content=system_prompt),
-                           HumanMessage(content=instruction)]
-        response = llm.with_structured_output(Router).invoke(scoped_messages, config=config)
-        choice = response.next
-        if choice == "FINISH":
-            goto = "__end__"
+        turns = dict(state.get("supervisor_turns") or {})
+        turn = turns.get(turns_key, 0) + 1
+        turns[turns_key] = turn
+
+        print(
+            f"INNER SUPERVISOR[{turns_key}] turn={turn} ran={run_so_far} "
+            f"remaining={remaining}"
+        )
+
+        if not remaining:
+            return Command(
+                goto="__end__", update={"next": "FINISH", "supervisor_turns": turns}
+            )
+
+        if turn > max_turns:
+            return Command(
+                goto="__end__",
+                update={
+                    "next": "FINISH",
+                    "supervisor_turns": turns,
+                    "messages": [
+                        AIMessage(
+                            content=(
+                                f"Supervisor for {turns_key} gave up after {turn} turns "
+                                f"without dispatching: {remaining}."
+                            ),
+                            name="supervisor",
+                        )
+                    ],
+                },
+            )
+
+        if len(remaining) == 1:
+            choice = remaining[0]  # nothing to decide — skip the LLM call entirely
         else:
-            goto = choice
-        return Command(goto=goto, update={"next": choice})
+            choices = remaining + ["FINISH"]
+            scoped_messages = [
+                SystemMessage(content=system_prompt),
+                HumanMessage(
+                    content=(
+                        f"{instruction}\n\n"
+                        f"Already completed: {run_so_far or 'none'}. "
+                        f"Still to do: {remaining}."
+                    )
+                ),
+            ]
+            response = llm.with_structured_output(_router_for(choices)).invoke(
+                scoped_messages, config=config
+            )
+            choice = response.next
+
+        goto = "__end__" if choice == "FINISH" else choice
+        return Command(goto=goto, update={"next": choice, "supervisor_turns": turns})
 
     return supervisor_node
