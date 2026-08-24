@@ -22,6 +22,9 @@ class MessagesState(TypedDict):
     # sees. dispatched_agents_run MUST be declared here or the supervisor reads it as empty
     # every turn and its "all members have run" exit condition can never fire.
     dispatched_agents_run: list[str]
+    # Same reason: the supervisor namespaces its turn budget by the parent's dispatch id, so
+    # that id has to be visible through this schema or every dispatch shares one budget.
+    _dispatched_id: str
 
 
 class DefaultAgent:
@@ -96,9 +99,9 @@ def make_supervisor_node(
     else:
         system_prompt = default_prompt
 
-    # `dispatched_agents_run` is a channel shared by every team in the parent graph, so the
-    # turn counter has to be namespaced or one team's dispatches would exhaust another's budget.
-    turns_key = team_name or ",".join(members)
+    # `supervisor_turns` is a channel shared by every team in the parent graph, so the turn
+    # counter has to be namespaced or one team's dispatches would exhaust another's budget.
+    team_label = team_name or ",".join(members)
     max_turns = len(members) + 1
 
     def _router_for(choices: list[str]) -> type[BaseModel]:
@@ -127,13 +130,20 @@ def make_supervisor_node(
         ]
         remaining = [m for m in members if m not in run_so_far]
 
+        # max_turns bounds ONE dispatch, so the counter must be scoped to one dispatch too.
+        # Keyed by team alone it is cumulative for the whole run: a team dispatched twice by
+        # the parent starts its second dispatch with the first dispatch's turns already spent,
+        # trips `turn > max_turns` immediately, and FINISHes without dispatching anyone —
+        # which silently skips that member's downstream nodes (e.g. a human_approval interrupt).
         turns = dict(state.get("supervisor_turns") or {})
+        turns_key = f"{team_label}:{state.get('_dispatched_id') or ''}"
         turn = turns.get(turns_key, 0) + 1
         turns[turns_key] = turn
 
         print(
             f"INNER SUPERVISOR[{turns_key}] turn={turn} ran={run_so_far} "
-            f"remaining={remaining}"
+            f"remaining={remaining}",
+            flush=True,
         )
 
         if not remaining:
@@ -150,7 +160,7 @@ def make_supervisor_node(
                     "messages": [
                         AIMessage(
                             content=(
-                                f"Supervisor for {turns_key} gave up after {turn} turns "
+                                f"Supervisor for {team_label} gave up after {turn} turns "
                                 f"without dispatching: {remaining}."
                             ),
                             name="supervisor",
