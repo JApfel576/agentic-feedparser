@@ -18,8 +18,6 @@ from base_agents import DefaultAgent, make_supervisor_node, MessagesState
 from typing import Annotated, Callable, Literal, TypedDict
 import operator
 
-from typer.cli import state
-
 # Resolve the project root (two levels up from this file)
 ROOT = Path(__file__).resolve().parents[4]
 load_dotenv(ROOT / ".env")
@@ -100,12 +98,19 @@ class SupervisorState(MessagesState):
     subtasks_planned: bool  # have we done the initial breakdown?
     _dispatched_id: str
     search_results: dict | None  # to hold search results for provide_site tool
-    approval_attempts: int  # caps the human_approval -> searcher retry cycle
+    # Keyed by approval_type, for the same reason supervisor_turns is keyed by team: a single
+    # shared int lets one team's rejections consume the other team's approval budget, so the
+    # second team's very first interrupt already reads attempts >= MAX and gives up at once.
+    approval_attempts: dict[str, int]  # caps each human_approval -> agent retry cycle
+    approval_type: str | None  # which approval is in progress
+    # Set by site_requester when it cannot do its work yet, so mark_subtask_complete leaves
+    # the subtask pending instead of stamping a no-op dispatch as done.
+    subtask_blocked: bool
 
 
 search = GoogleSerperAPIWrapper()
 api_host = "http://127.0.0.1:8000"
-MAX_APPROVAL_ATTEMPTS = 3  # how many times human_approval may bounce back to searcher
+MAX_APPROVAL_ATTEMPTS = 3  # how many times human_approval may bounce back to agent before giving up and proceeding to supervisor
 
 
 def build_api_url(endpoint: Endpoint) -> str:
@@ -249,17 +254,34 @@ def request_team(
     def site_requester(state: SupervisorState) -> Command[Literal["supervisor"]]:
         tools = [provide_site]
         system_prompt = """You are an agent tasked with providing site url data to API. Use the provide_site tool to make a GET request to the API url endpoint and return the status and message. Ensure that you handle any errors gracefully and provide a clear response."""
+        # Gate on search_results, the same signal the parent supervisor's _is_blocked
+        # uses, so the two agree. Deliberately does NOT append to dispatched_agents_run:
+        # this early return did no work, so it must not consume site_requester's slot —
+        # otherwise a later dispatch of this team finds remaining == [] and FINISHes
+        # before human_approval (and its interrupt) can ever be reached.
+        sites = (state.get("search_results") or {}).get("sites", [])
+        if not sites:
+            return Command(
+                update={
+                    "messages": [
+                        AIMessage(
+                            content=(
+                                "No search results available. Please run the search step first."
+                            ),
+                            name="site_requester",
+                        )
+                    ],
+                    # Tell the parent this dispatch accomplished nothing so the subtask stays
+                    # pending and can be re-dispatched once search_results exists. Without
+                    # this the parent's unconditional request_team -> mark_subtask_complete
+                    # edge stamps it completed and human_approval is never reached.
+                    "subtask_blocked": True,
+                },
+                goto="supervisor",
+            )
         # The site lives in graph state, not in config — hand it to the agent in the
         # instruction so the provide_site tool receives it as an argument.
-        sites = (state.get("search_results") or {}).get("sites", [])
-        instruction = state["current_instruction"]
-        if sites:
-            instruction = f"{instruction}\n\nUse this site url: {sites[0]}"
-        else:
-            instruction = (
-                f"{instruction}\n\nNo site url is available from the search step — "
-                "report this as an error instead of calling provide_site."
-            )
+        instruction = f"{state['current_instruction']}\n\nUse this site url: {sites[0]}"
 
         api_agent = DefaultAgent(
             state=state,
@@ -279,10 +301,11 @@ def request_team(
                         name="site_requester",
                     )
                 ],
+                "current_instruction": instruction,
                 "dispatched_agents_run": state.get("dispatched_agents_run", [])
                 + ["site_requester"],
             },
-            goto="supervisor",
+            goto="human_approval",
         )
 
     agent_roles = [
@@ -293,6 +316,50 @@ def request_team(
         model, agent_roles, config=config, team_name="request_team"
     )
 
+    def human_approval(
+            state: SupervisorState,
+        ) -> Command[Literal["supervisor", "site_requester"]]:
+            all_attempts = dict(state.get("approval_attempts") or {})
+            attempts = all_attempts.get("site_requester", 0) + 1
+            all_attempts["site_requester"] = attempts
+            print(
+                f"HUMAN_APPROVAL[site_requester] ENTERED attempt={attempts}, "
+                f"dispatched_agents_run: {state.get('dispatched_agents_run')}",
+                flush=True,
+            )
+            response = interrupt(
+                {
+                    "question": f"Do you approve the api call to feedpoller at {api_host} using site_requester? (yes/no)",
+                    "current_instruction": state.get("current_instruction", {}),
+                    "attempt": attempts,
+                    "max_attempts": MAX_APPROVAL_ATTEMPTS,
+                    "approval_type": "site_requester"
+                }
+            )
+            is_approved = str(response).strip().lower() in ("yes", "y", "true", "1")
+            update = {
+                "dispatched_agents_run": state.get("dispatched_agents_run", [])
+                + ["human_approval"],
+                "approval_attempts": all_attempts,
+                "approval_type": "site_requester",
+            }
+            if is_approved:
+                return Command(update=update, goto="supervisor")
+            if attempts >= MAX_APPROVAL_ATTEMPTS:
+                # Bound the reject cycle: without this, agent <-> human_approval never settles.
+                update["messages"] = [
+                    AIMessage(
+                        content=(
+                            f"API call was not approved after {attempts} attempts; "
+                            "giving up on the request."
+                        ),
+                        name="human_approval",
+                    )
+                ]
+                return Command(update=update, goto="supervisor")
+            return Command(update=update, goto="site_requester")
+    
+
     builder = StateGraph(SupervisorState)
     builder.add_node(
         "health_requester", health_requester
@@ -300,7 +367,9 @@ def request_team(
     builder.add_node(
         "site_requester", site_requester
     )  # agent subgraph node, returns updates to supervisor
+    builder.add_node("human_approval", human_approval) # human approval for site_requester
     builder.add_node("supervisor", supervisor_node)
+    
 
     builder.set_entry_point("supervisor")
     return builder.compile()
@@ -342,10 +411,13 @@ def search_team(
     def human_approval(
         state: SupervisorState,
     ) -> Command[Literal["supervisor", "searcher"]]:
-        attempts = (state.get("approval_attempts") or 0) + 1
+        all_attempts = dict(state.get("approval_attempts") or {})
+        attempts = all_attempts.get("searcher", 0) + 1
+        all_attempts["searcher"] = attempts
         print(
-            f"HUMAN_APPROVAL ENTERED attempt={attempts}, dispatched_agents_run:",
-            state.get("dispatched_agents_run"),
+            f"HUMAN_APPROVAL[searcher] ENTERED attempt={attempts}, "
+            f"dispatched_agents_run: {state.get('dispatched_agents_run')}",
+            flush=True,
         )
         response = interrupt(
             {
@@ -353,13 +425,15 @@ def search_team(
                 "search_results": state.get("search_results", {}),
                 "attempt": attempts,
                 "max_attempts": MAX_APPROVAL_ATTEMPTS,
+                "approval_type": "searcher"
             }
         )
         is_approved = str(response).strip().lower() in ("yes", "y", "true", "1")
         update = {
             "dispatched_agents_run": state.get("dispatched_agents_run", [])
             + ["human_approval"],
-            "approval_attempts": attempts,
+            "approval_attempts": all_attempts,
+            "approval_type": "searcher",
         }
         if is_approved:
             return Command(update=update, goto="supervisor")
@@ -419,11 +493,23 @@ def build_top_graph(model_str, config):
     FINISH_TOKEN = "FINISH"
 
     def mark_subtask_complete(state: SupervisorState) -> Command[Literal["supervisor"]]:
+        # A team that bailed out early did no work, so leave its subtask pending — otherwise
+        # it is stamped completed, never re-dispatched, and its downstream nodes (including
+        # human_approval's interrupt) never run. Always clear the flag so it cannot leak into
+        # the next dispatch.
+        if state.get("subtask_blocked"):
+            print(
+                f"SUBTASK {state['_dispatched_id']} left pending (team reported blocked)",
+                flush=True,
+            )
+            return Command(goto="supervisor", update={"subtask_blocked": False})
         updated = [
             {**s, "status": "completed"} if s["id"] == state["_dispatched_id"] else s
             for s in state["subtasks"]
         ]
-        return Command(goto="supervisor", update={"subtasks": updated})
+        return Command(
+            goto="supervisor", update={"subtasks": updated, "subtask_blocked": False}
+        )
 
     def supervisor_node(
         state: SupervisorState, config: RunnableConfig
@@ -453,8 +539,13 @@ def build_top_graph(model_str, config):
             # Block any request_team subtask that posts sites until search_results is ready
 
         def _is_blocked(s: Subtask) -> bool:
+            # Fail closed, not open. request_team has exactly two workers and only the health
+            # check is dependency-free, so key off "health" rather than "site": matching on
+            # "site" depends on the planner LLM's word choice, and any phrasing that omits it
+            # ("submit the urls to the API") slips through unblocked and gets dispatched
+            # before search_results exists.
             needs_search_results = (
-                s["team"] == "request_team" and "site" in s["instruction"].lower()
+                s["team"] == "request_team" and "health" not in s["instruction"].lower()
             )
             if not needs_search_results:
                 return False
@@ -526,30 +617,54 @@ def build_top_graph(model_str, config):
 if __name__ == "__main__":
     topic = "latest reliable news source affecting stock market"
     # recursion_limit kept low so a routing regression surfaces immediately instead of
-    # burning 25 supersteps of LLM calls.
-    config = {"configurable": {"thread_id": str(uuid.uuid4())}, "recursion_limit": 12}
+    # burning supersteps of LLM calls — but not so low that a legitimate run trips it.
+    # A 3-subtask plan already costs ~10 parent supersteps, the step counter carries across
+    # Command(resume=...) resumes, and every rejected approval adds more; at 12 the run died
+    # with a GraphRecursionError before the second interrupt could ever be raised.
+    config = {"configurable": {"thread_id": str(uuid.uuid4())}, "recursion_limit": 40}
     graph = build_top_graph(model_str="openai:gpt-5.4-mini", config=config)
 
-    try:
-        result = graph.invoke(
-            {
-                "messages": [
-                    HumanMessage(
-                        content=f"Check the health of the API then provide full URLs prefixed as Google News search queries for relevant sites for {topic}. Finally provide those urls from previous step to the API via provide site tool."
-                    )
-                ]
-            },
-            config=config,
-        )
-    except Exception:
-        import traceback
-        traceback.print_exc()
-        raise
+    def run(payload):
+        """Every invoke goes through here — the resume calls need the same traceback
+        handling as the first one, otherwise an error mid-loop kills the approval prompts
+        with a bare stack trace and the remaining interrupts are never shown."""
+        try:
+            return graph.invoke(payload, config=config)
+        except Exception:
+            import traceback
 
-    while "__interrupt__" in result:
-        payload = result["__interrupt__"][0].value
-        print(payload["question"], payload["search_results"])
+            traceback.print_exc()
+            raise
+
+    result = run(
+        {
+            "messages": [
+                HumanMessage(
+                    content=f"Check the health of the API then provide full URLs prefixed as Google News search queries for relevant sites for {topic}. Finally provide those urls from previous step to the API via provide site tool."
+                )
+            ]
+        }
+    )
+
+    while result.get("__interrupt__"):
+        interrupts = result["__interrupt__"]
+        if len(interrupts) > 1:
+            # Command(resume=...) answers one interrupt; surface the rest rather than
+            # silently dropping them.
+            print(
+                f"NOTE: {len(interrupts)} interrupts pending, answering the first: "
+                f"{[i.value.get('approval_type') for i in interrupts]}",
+                flush=True,
+            )
+        payload = interrupts[0].value
+        match payload.get("approval_type"):
+            case "searcher":
+                print(payload["question"], payload["search_results"], flush=True)
+            case "site_requester":
+                print(payload["question"], payload["current_instruction"], flush=True)
+            case _:
+                print(payload.get("question", "Approval needed"), flush=True)
         answer = input("yes/no: ")
-        result = graph.invoke(Command(resume=answer), config=config)
+        result = run(Command(resume=answer))
 
     print(result)
