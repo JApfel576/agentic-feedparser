@@ -101,39 +101,41 @@ def rss_endpoint(url_input: RssUrl):
     return url_input
 
 
+from fastapi import HTTPException
+
 @app.get("/data", response_model=Model)
 def feed_data(url_input: RssUrl) -> Any:
-    (
-        """Get data using created feed url"""
-        """ and store in site specific folder"""
-    )
+    """Get data using created feed url and store in site specific folder"""
     site_folder = extract_site(url_input)
-    out_dir = f"/var/data/{site_folder}"
+    out_dir = f"var/data/{site_folder}"
+
     rss_poller = FeedPoller(url=url_input, out_dir=out_dir)
     result = rss_poller.poll()
-    if result:
-        file = recent_feed_data(path=out_dir)
-        print(file)
-        try:
-            with open(file) as f:
-                data = json.load(f)
-            logger.info("Loaded feed data from file")
-            return data
-        except FileNotFoundError:
-            logger.error("File was not found")
-        except json.decoder.JSONDecodeError:
-            logger.error("File was not serialized")
-    else:
-        data = {
+
+    if not result:
+        # poll() returned falsy — could mean "not modified" or a real failure.
+        # Don't fabricate a fake payload; tell the caller explicitly.
+        logger.info(f"poll() returned no new data for {url_input}")
+        return {
             "header": {"etag": "", "updated": ""},
-            "items": [
-                {
-                    "title": "",
-                    "summary": "",
-                    "published": "",
-                    "guid": "",
-                    "link": "",
-                }
-            ],
+            "items": [],
+            "status": "no_new_data",  # explicit, not inferred from empty fields
         }
+
+    file = recent_feed_data(path=out_dir)
+    if file is None:
+        logger.error(f"poll() succeeded but no data file found in {out_dir}")
+        raise HTTPException(status_code=500, detail="poll succeeded but no output file found")
+
+    try:
+        with open(file) as f:
+            data = json.load(f)
+        logger.info(f"Loaded feed data from {file}")
+        data["status"] = "ok"
         return data
+    except FileNotFoundError:
+        logger.error(f"File not found: {file}")
+        raise HTTPException(status_code=500, detail="feed data file not found")
+    except json.decoder.JSONDecodeError:
+        logger.error(f"File was not valid JSON: {file}")
+        raise HTTPException(status_code=500, detail="feed data file is corrupted")
