@@ -62,7 +62,7 @@ class APIHealthEndpoint(BaseModel):
 
 
 class APISiteEndpoint(BaseModel):
-    """Structured output for API health endpoint check"""
+    """Structured output for API Site endpoint"""
 
     endpoint: str = Field(description="Endpoint for providing site url data")
     site: str = Field(description="Site url data to be provided")
@@ -211,7 +211,9 @@ def provide_site(site: str) -> dict:
             param_site="url_input",
             site=converted_url.get("response"),
         )
-        return request_data
+        if isinstance(request_data, dict):
+            return request_data
+        raise TypeError(f"Expected dict, got {type(request_data).__name__}")
 
     return (
         fetch_site_data(site)
