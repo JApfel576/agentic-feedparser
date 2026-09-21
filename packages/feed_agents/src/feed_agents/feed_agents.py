@@ -211,9 +211,9 @@ def provide_site(site: str) -> dict:
             param_site="url_input",
             site=converted_url.get("response"),
         )
-        if isinstance(request_data, dict):
-            return request_data
-        raise TypeError(f"Expected dict, got {type(request_data).__name__}")
+        # if isinstance(request_data, dict):
+        #     return request_data
+        # raise TypeError(f"Expected dict, got {type(request_data).__name__}")
 
     return (
         fetch_site_data(site)
@@ -283,7 +283,7 @@ def request_team(
             )
         # The site lives in graph state, not in config — hand it to the agent in the
         # instruction so the provide_site tool receives it as an argument.
-        instruction = f"{state['current_instruction']}\n\nUse this site url: {sites[0]}"
+        instruction = f"{state['current_instruction']}\n\nMake requests for each site url: {', '.join(sites)}"
 
         api_agent = DefaultAgent(
             state=state,
@@ -319,48 +319,47 @@ def request_team(
     )
 
     def human_approval(
-            state: SupervisorState,
-        ) -> Command[Literal["supervisor", "site_requester"]]:
-            all_attempts = dict(state.get("approval_attempts") or {})
-            attempts = all_attempts.get("site_requester", 0) + 1
-            all_attempts["site_requester"] = attempts
-            print(
-                f"HUMAN_APPROVAL[site_requester] ENTERED attempt={attempts}, "
-                f"dispatched_agents_run: {state.get('dispatched_agents_run')}",
-                flush=True,
-            )
-            response = interrupt(
-                {
-                    "question": f"Do you approve the api call to feedpoller at {api_host} using site_requester? (yes/no)",
-                    "current_instruction": state.get("current_instruction", {}),
-                    "attempt": attempts,
-                    "max_attempts": MAX_APPROVAL_ATTEMPTS,
-                    "approval_type": "site_requester"
-                }
-            )
-            is_approved = str(response).strip().lower() in ("yes", "y", "true", "1")
-            update = {
-                "dispatched_agents_run": state.get("dispatched_agents_run", [])
-                + ["human_approval"],
-                "approval_attempts": all_attempts,
+        state: SupervisorState,
+    ) -> Command[Literal["supervisor", "site_requester"]]:
+        all_attempts = dict(state.get("approval_attempts") or {})
+        attempts = all_attempts.get("site_requester", 0) + 1
+        all_attempts["site_requester"] = attempts
+        print(
+            f"HUMAN_APPROVAL[site_requester] ENTERED attempt={attempts}, "
+            f"dispatched_agents_run: {state.get('dispatched_agents_run')}",
+            flush=True,
+        )
+        response = interrupt(
+            {
+                "question": f"Do you approve the api call to feedpoller at {api_host} using site_requester? (yes/no)",
+                "current_instruction": state.get("current_instruction", {}),
+                "attempt": attempts,
+                "max_attempts": MAX_APPROVAL_ATTEMPTS,
                 "approval_type": "site_requester",
             }
-            if is_approved:
-                return Command(update=update, goto="supervisor")
-            if attempts >= MAX_APPROVAL_ATTEMPTS:
-                # Bound the reject cycle: without this, agent <-> human_approval never settles.
-                update["messages"] = [
-                    AIMessage(
-                        content=(
-                            f"API call was not approved after {attempts} attempts; "
-                            "giving up on the request."
-                        ),
-                        name="human_approval",
-                    )
-                ]
-                return Command(update=update, goto="supervisor")
-            return Command(update=update, goto="site_requester")
-    
+        )
+        is_approved = str(response).strip().lower() in ("yes", "y", "true", "1")
+        update = {
+            "dispatched_agents_run": state.get("dispatched_agents_run", [])
+            + ["human_approval"],
+            "approval_attempts": all_attempts,
+            "approval_type": "site_requester",
+        }
+        if is_approved:
+            return Command(update=update, goto="supervisor")
+        if attempts >= MAX_APPROVAL_ATTEMPTS:
+            # Bound the reject cycle: without this, agent <-> human_approval never settles.
+            update["messages"] = [
+                AIMessage(
+                    content=(
+                        f"API call was not approved after {attempts} attempts; "
+                        "giving up on the request."
+                    ),
+                    name="human_approval",
+                )
+            ]
+            return Command(update=update, goto="supervisor")
+        return Command(update=update, goto="site_requester")
 
     builder = StateGraph(SupervisorState)
     builder.add_node(
@@ -369,9 +368,10 @@ def request_team(
     builder.add_node(
         "site_requester", site_requester
     )  # agent subgraph node, returns updates to supervisor
-    builder.add_node("human_approval", human_approval) # human approval for site_requester
+    builder.add_node(
+        "human_approval", human_approval
+    )  # human approval for site_requester
     builder.add_node("supervisor", supervisor_node)
-    
 
     builder.set_entry_point("supervisor")
     return builder.compile()
@@ -381,8 +381,10 @@ def search_team(
     state: SupervisorState, model: str, config: RunnableConfig | None
 ) -> Callable[[SupervisorState], Command[Literal["supervisor"]]]:
     def search_agent(state: SupervisorState) -> Command[Literal["supervisor"]]:
-        print("SEARCH_AGENT ENTERED, dispatched_agents_run:",
-            state.get("dispatched_agents_run"))
+        print(
+            "SEARCH_AGENT ENTERED, dispatched_agents_run:",
+            state.get("dispatched_agents_run"),
+        )
         tools = [relevant_site, guess_url]
         system_prompt = """You are a search agent tasked with finding relevant sites for a given topic. Use the relevant_site and guess_url tools to provide full URLs prefixed as Google News search queries."""
         instruction = state["current_instruction"]
@@ -427,7 +429,7 @@ def search_team(
                 "search_results": state.get("search_results", {}),
                 "attempt": attempts,
                 "max_attempts": MAX_APPROVAL_ATTEMPTS,
-                "approval_type": "searcher"
+                "approval_type": "searcher",
             }
         )
         is_approved = str(response).strip().lower() in ("yes", "y", "true", "1")

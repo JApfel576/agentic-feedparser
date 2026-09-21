@@ -73,6 +73,12 @@ dependencies = [
     "debugpy>=1.8.21",
     "ipykernel>=7.3.0",
     "pygraphviz>=2.0.1",
+    "pandas>=3.0.6",
+    "bs4>=0.0.2",
+    "googlenewsdecoder>=0.1.7",
+    "curl-cffi>=0.16.3",
+    "spacy>=3.8.16",
+    "ftfy>=6.3.1",
 ]
 
 [tool.fastapi]
