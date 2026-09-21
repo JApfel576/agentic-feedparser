@@ -82,6 +82,7 @@ This approach avoids scraping entire sites unless the metadata indicates the art
 │               ├── dependency_links.txt
 │               ├── requires.txt
 │               └── top_level.txt
+├── process_data.py
 ├── pyproject.toml
 ├── services
 │   └── fastapi_app
@@ -92,6 +93,13 @@ This approach avoids scraping entire sites unless the metadata indicates the art
 ├── uv.lock
 └── var
     └── data
+        ├── Anasdaq_com
+        │   ├── 20260918_001730.json
+        │   ├── document
+        │   │   └── 20260918_001730.json
+        │   ├── processed
+        │   │   └── 20260918_001730.json
+        │   └── state.json
         ├── bbc_com
         │   ├── 20260515_183820.json
         │   └── state.json
@@ -99,6 +107,6 @@ This approach avoids scraping entire sites unless the metadata indicates the art
             ├── 20260515_183846.json
             └── state.json
 
-22 directories, 36 files
+25 directories, 41 files
 ```
 <!-- TREE_END -->
