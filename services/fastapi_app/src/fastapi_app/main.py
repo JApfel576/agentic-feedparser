@@ -103,6 +103,7 @@ def rss_endpoint(url_input: RssUrl):
 
 from fastapi import HTTPException
 
+
 @app.get("/data", response_model=Model)
 def feed_data(url_input: RssUrl) -> Any:
     """Get data using created feed url and store in site specific folder"""
@@ -125,7 +126,9 @@ def feed_data(url_input: RssUrl) -> Any:
     file = recent_feed_data(path=out_dir)
     if file is None:
         logger.error(f"poll() succeeded but no data file found in {out_dir}")
-        raise HTTPException(status_code=500, detail="poll succeeded but no output file found")
+        raise HTTPException(
+            status_code=500, detail="poll succeeded but no output file found"
+        )
 
     try:
         with open(file) as f:
