@@ -46,7 +46,7 @@ class DefaultAgent:
         self.workflow = StateGraph(MessagesState)
         self.setup_graph()
         # self.checkpointer = MemorySaver()
-        self.graph = self.workflow.compile() #checkpointer=self.checkpointer
+        self.graph = self.workflow.compile()  # checkpointer=self.checkpointer
         self.llm_with_tools = self.model.bind_tools(tools=self.tools)
 
     def setup_graph(self):
@@ -121,9 +121,9 @@ def make_supervisor_node(
         instruction = state.get("current_instruction")
         if not instruction:
             raise ValueError(
-            "supervisor_node requires current_instruction in state — "
-            "got none. Check that the dispatching graph sets it before entering this subgraph."
-        )
+                "supervisor_node requires current_instruction in state — "
+                "got none. Check that the dispatching graph sets it before entering this subgraph."
+            )
         # Filter to this team's roster: the parent-level list also carries other teams' workers.
         run_so_far = [
             m for m in (state.get("dispatched_agents_run") or []) if m in members
