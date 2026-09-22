@@ -49,6 +49,7 @@ This approach avoids scraping entire sites unless the metadata indicates the art
 ├── assets
 │   └── agent_teams_graph.png
 ├── compose.yaml
+├── ingest.py
 ├── packages
 │   ├── base_agents
 │   │   ├── README.md
@@ -84,6 +85,7 @@ This approach avoids scraping entire sites unless the metadata indicates the art
 │               └── top_level.txt
 ├── process_data.py
 ├── pyproject.toml
+├── query.py
 ├── services
 │   └── fastapi_app
 │       ├── pyproject.toml
@@ -107,6 +109,6 @@ This approach avoids scraping entire sites unless the metadata indicates the art
             ├── 20260515_183846.json
             └── state.json
 
-25 directories, 41 files
+25 directories, 43 files
 ```
 <!-- TREE_END -->
