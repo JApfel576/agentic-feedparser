@@ -1,6 +1,5 @@
 import json
 from pathlib import Path
-from random import sample
 from curl_cffi import requests
 from bs4 import BeautifulSoup
 from googlenewsdecoder import gnewsdecoder
@@ -9,7 +8,7 @@ import ftfy
 path = "var/data/Anasdaq_com/"
 filename = "20260918_001730.json"
 file_path = Path(path) / filename
-with open(file_path) as f:
+with open(file_path, encoding="utf-8") as f:
     data = json.load(f)
 
 
@@ -54,7 +53,7 @@ def flat_json_text(new_dict):
 
 def processed_data(entries, path, filename):
     processed_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(processed_path, "w") as f:
+    with open(processed_path, "w", encoding="utf-8") as f:
         json.dump(entries, f, indent=4)
 
 
@@ -63,7 +62,9 @@ def fetch_and_parse_url(actual_url):
         # Add the impersonate parameter to match a real browser fingerprint
         response = requests.get(actual_url, impersonate="chrome120", timeout=15)
         if response.status_code == 200:
-            soup = BeautifulSoup(response.content, "html.parser")
+            soup = BeautifulSoup(
+                response.content.decode("utf-8", errors="ignore"), "html.parser"
+            )
 
         # Get first paragraph text from the fetched page
         min_words = 40  # Minimum number of words in a sentence
@@ -129,16 +130,19 @@ def get_sample_text(entries):
         if isinstance(decoded_data, dict) and decoded_data.get("decoded_url"):
             actual_url = decoded_data.get("decoded_url")
             print(f"Processing: {actual_url}")
-            sample_text = fetch_and_parse_url(actual_url)
+            if not actual_url.endswith(".pdf"):
+                sample_text = fetch_and_parse_url(actual_url)
+            else:
+                sample_text = "This is placeholder sample text for pdf content."  # Placeholder for PDF or non-HTML content
             return f"This is the sample text for entry {entry['id']}: {sample_text}"
 
 
 def create_document(path, filename):
     document_path.parent.mkdir(parents=True, exist_ok=True)
     document = []
-    with open(processed_path, "r") as f:
+    with open(processed_path, "r", encoding="utf-8") as f:
         processed_file = json.load(f)
-        with open(document_path, "w") as f:
+        with open(document_path, "w", encoding="utf-8") as f:
             for entry in processed_file:
                 text = f"{entry['text']} {entry.get('sample_text', '')}"
                 document.append(text)
@@ -153,11 +157,11 @@ entries = [
     for i, t, l in zip(flat_items["id"], flat_items["text"], flat_items["link"])
 ]
 
-for entry in entries[:10]:  # Limit to first 10 entries for testing
+for entry in entries:
     entry["sample_text"] = get_sample_text(entry)
 
 processed_path = Path(path) / "processed" / filename
 processed_data(entries, processed_path, filename)
 
-document_path = Path(path) / "document" / filename
+document_path = Path(path) / "document" / filename.replace(".json", ".txt")
 create_document(processed_path, document_path)
