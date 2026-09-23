@@ -82,6 +82,7 @@ dependencies = [
     "langchain-text-splitters>=1.1.2",
     "chroma>=0.2.0",
     "langchain-chroma>=1.1.0",
+    "process-data",
 ]
 
 [tool.fastapi]
@@ -93,11 +94,13 @@ members = [
     "services/fastapi_app",
     "packages/feed_agents",
     "packages/base_agents",
+    "packages/process_data",
 ]
 
 [tool.uv.sources]
 feedpoller = { workspace = true }
 base-agents = { workspace = true }
+process-data = { workspace = true }
 
 [dependency-groups]
 dev = [
