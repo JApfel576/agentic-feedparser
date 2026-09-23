@@ -71,19 +71,25 @@ This approach avoids scraping entire sites unless the metadata indicates the art
 │   │       └── feed_agents
 │   │           ├── __init__.py
 │   │           └── feed_agents.py
-│   └── feedpoller
+│   ├── feedpoller
+│   │   ├── pyproject.toml
+│   │   └── src
+│   │       ├── feedpoller
+│   │       │   ├── __init__.py
+│   │       │   └── feedpoller.py
+│   │       └── feedpoller.egg-info
+│   │           ├── PKG-INFO
+│   │           ├── SOURCES.txt
+│   │           ├── dependency_links.txt
+│   │           ├── requires.txt
+│   │           └── top_level.txt
+│   └── process_data
+│       ├── README.md
 │       ├── pyproject.toml
 │       └── src
-│           ├── feedpoller
-│           │   ├── __init__.py
-│           │   └── feedpoller.py
-│           └── feedpoller.egg-info
-│               ├── PKG-INFO
-│               ├── SOURCES.txt
-│               ├── dependency_links.txt
-│               ├── requires.txt
-│               └── top_level.txt
-├── process_data.py
+│           └── process_data
+│               ├── __init__.py
+│               └── process_data.py
 ├── pyproject.toml
 ├── query.py
 ├── services
@@ -109,6 +115,6 @@ This approach avoids scraping entire sites unless the metadata indicates the art
             ├── 20260515_183846.json
             └── state.json
 
-25 directories, 43 files
+28 directories, 46 files
 ```
 <!-- TREE_END -->
