@@ -110,7 +110,7 @@ class ProcessData:
             # Catch-all for network issues (like DNS failure or dropped sockets)
             print(f"Skipping: Network error occurred -> {e}")
 
-    def get_sample_text(entry):
+    def get_sample_text(self, entry):
         # Fetch the actual URL from the Google News link using gnewsdecoder
         with requests.Session() as session:
             session.headers.update(
@@ -131,7 +131,7 @@ class ProcessData:
                 actual_url = decoded_data.get("decoded_url")
                 print(f"Processing: {actual_url}")
                 if not actual_url.endswith(".pdf"):
-                    sample_text = fetch_and_parse_url(actual_url)
+                    sample_text = self.fetch_and_parse_url(actual_url)
                 else:
                     sample_text = "This is placeholder sample text for pdf content."  # Placeholder for PDF or non-HTML content
                 return f"This is the sample text for entry {entry['id']}: {sample_text}"
