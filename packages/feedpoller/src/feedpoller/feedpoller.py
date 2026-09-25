@@ -100,6 +100,7 @@ class FeedPoller:
                 }
                 for e in feed.entries
             ],
+            "filename": path
         }
         Path(path).write_text(json.dumps(data, indent=2))
         return data
