@@ -30,8 +30,23 @@ class Model(BaseModel):
     header: Header
     items: list[Item]
 
+# Source - https://stackoverflow.com/a/53496263
+# Posted by Orly
+# Retrieved 2026-09-24, License - CC BY-SA 4.0
 
-logger = logging.getLogger(__name__)
+# set up logging to file
+logging.basicConfig(level=logging.DEBUG,
+                    format='%(asctime)s %(name)-12s %(levelname)-8s %(message)s',
+                    datefmt='%m-%d %H:%M',
+                    filename='./log/myapp.log',
+                    filemode='w')
+# define a Handler which writes INFO messages or higher to the sys.stderr
+console = logging.StreamHandler()
+console.setLevel(logging.INFO)
+# add the handler to the root logger
+logging.getLogger('').addHandler(console)
+
+
 app = FastAPI()
 
 
@@ -116,7 +131,7 @@ def feed_data(url_input: RssUrl) -> Any:
     if not result:
         # poll() returned falsy — could mean "not modified" or a real failure.
         # Don't fabricate a fake payload; tell the caller explicitly.
-        logger.info(f"poll() returned no new data for {url_input}")
+        logging.info(f"poll() returned no new data for {url_input}")
         return {
             "header": {"etag": "", "updated": ""},
             "items": [],
@@ -125,7 +140,7 @@ def feed_data(url_input: RssUrl) -> Any:
 
     file = recent_feed_data(path=out_dir)
     if file is None:
-        logger.error(f"poll() succeeded but no data file found in {out_dir}")
+        logging.error(f"poll() succeeded but no data file found in {out_dir}")
         raise HTTPException(
             status_code=500, detail="poll succeeded but no output file found"
         )
@@ -133,12 +148,13 @@ def feed_data(url_input: RssUrl) -> Any:
     try:
         with open(file) as f:
             data = json.load(f)
-        logger.info(f"Loaded feed data from {file}")
+            data["filename"] = file
+        logging.info(f"Loaded feed data from {file}")
         data["status"] = "ok"
         return data
     except FileNotFoundError:
-        logger.error(f"File not found: {file}")
+        logging.error(f"File not found: {file}")
         raise HTTPException(status_code=500, detail="feed data file not found")
     except json.decoder.JSONDecodeError:
-        logger.error(f"File was not valid JSON: {file}")
+        logging.error(f"File was not valid JSON: {file}")
         raise HTTPException(status_code=500, detail="feed data file is corrupted")

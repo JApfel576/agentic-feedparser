@@ -1,0 +1,8 @@
+09-24 21:03 urllib3.connectionpool DEBUG    Starting new HTTPS connection (1): news.google.com:443
+09-24 21:04 urllib3.connectionpool DEBUG    https://news.google.com:443 "GET /rss/search?q=site:reuters.com/markets/%20latest%20stock%20market%20moving%20news%22%7D HTTP/1.1" 302 0
+09-24 21:04 urllib3.connectionpool DEBUG    https://news.google.com:443 "GET /rss/search?q=site:reuters.com/markets/+latest+stock+market+moving+news%22%7D&hl=en-US&gl=US&ceid=US:en HTTP/1.1" 200 None
+09-24 21:04 root         INFO     Loaded feed data from C:\Users\japfe\Documents\genai-pipeline-project\services\fastapi_app\var\data\reuters_com\20260925_010401.json
+09-24 21:04 urllib3.connectionpool DEBUG    Starting new HTTPS connection (1): news.google.com:443
+09-24 21:04 urllib3.connectionpool DEBUG    https://news.google.com:443 "GET /rss/search?q=site:reuters.com/markets/%20latest%20stock%20market%20moving%20news%22%7D HTTP/1.1" 302 0
+09-24 21:04 urllib3.connectionpool DEBUG    https://news.google.com:443 "GET /rss/search?q=site:reuters.com/markets/+latest+stock+market+moving+news%22%7D&hl=en-US&gl=US&ceid=US:en HTTP/1.1" 200 21868
+09-24 21:04 root         INFO     poll() returned no new data for https://news.google.com/rss/search?q=site:reuters.com/markets/%20latest%20stock%20market%20moving%20news%22}
