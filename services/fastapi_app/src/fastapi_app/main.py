@@ -29,6 +29,7 @@ class Item(BaseModel):
 class Model(BaseModel):
     header: Header
     items: list[Item]
+    filename: str 
 
 # Source - https://stackoverflow.com/a/53496263
 # Posted by Orly
@@ -136,6 +137,7 @@ def feed_data(url_input: RssUrl) -> Any:
             "header": {"etag": "", "updated": ""},
             "items": [],
             "status": "no_new_data",  # explicit, not inferred from empty fields
+            "filename": ""
         }
 
     file = recent_feed_data(path=out_dir)
