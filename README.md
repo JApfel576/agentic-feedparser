@@ -49,6 +49,7 @@ This approach avoids scraping entire sites unless the metadata indicates the art
 ├── assets
 │   └── agent_teams_graph.png
 ├── compose.yaml
+├── ingest.py
 ├── packages
 │   ├── base_agents
 │   │   ├── README.md
@@ -70,21 +71,31 @@ This approach avoids scraping entire sites unless the metadata indicates the art
 │   │       └── feed_agents
 │   │           ├── __init__.py
 │   │           └── feed_agents.py
-│   └── feedpoller
+│   ├── feedpoller
+│   │   ├── pyproject.toml
+│   │   └── src
+│   │       ├── feedpoller
+│   │       │   ├── __init__.py
+│   │       │   └── feedpoller.py
+│   │       └── feedpoller.egg-info
+│   │           ├── PKG-INFO
+│   │           ├── SOURCES.txt
+│   │           ├── dependency_links.txt
+│   │           ├── requires.txt
+│   │           └── top_level.txt
+│   └── process_data
+│       ├── README.md
 │       ├── pyproject.toml
 │       └── src
-│           ├── feedpoller
-│           │   ├── __init__.py
-│           │   └── feedpoller.py
-│           └── feedpoller.egg-info
-│               ├── PKG-INFO
-│               ├── SOURCES.txt
-│               ├── dependency_links.txt
-│               ├── requires.txt
-│               └── top_level.txt
+│           └── process_data
+│               ├── __init__.py
+│               └── process_data.py
 ├── pyproject.toml
+├── query.py
 ├── services
 │   └── fastapi_app
+│       ├── log
+│       │   └── myapp.log
 │       ├── pyproject.toml
 │       └── src
 │           └── fastapi_app
@@ -92,6 +103,13 @@ This approach avoids scraping entire sites unless the metadata indicates the art
 ├── uv.lock
 └── var
     └── data
+        ├── Anasdaq_com
+        │   ├── 20260918_001730.json
+        │   ├── document
+        │   │   └── 20260918_001730.json
+        │   ├── processed
+        │   │   └── 20260918_001730.json
+        │   └── state.json
         ├── bbc_com
         │   ├── 20260515_183820.json
         │   └── state.json
@@ -99,6 +117,6 @@ This approach avoids scraping entire sites unless the metadata indicates the art
             ├── 20260515_183846.json
             └── state.json
 
-22 directories, 36 files
+29 directories, 47 files
 ```
 <!-- TREE_END -->
