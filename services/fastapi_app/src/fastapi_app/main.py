@@ -1,7 +1,7 @@
 from fastapi import FastAPI
 from typing import Any, Annotated
 from pydantic import BaseModel, ValidationError, HttpUrl, AfterValidator
-from urllib.parse import urlunparse
+from urllib.parse import urlunparse, urlparse
 import json
 import re
 from feedpoller import FeedPoller
@@ -29,23 +29,26 @@ class Item(BaseModel):
 class Model(BaseModel):
     header: Header
     items: list[Item]
-    filename: str 
+    filename: str
+
 
 # Source - https://stackoverflow.com/a/53496263
 # Posted by Orly
 # Retrieved 2026-09-24, License - CC BY-SA 4.0
 
 # set up logging to file
-logging.basicConfig(level=logging.DEBUG,
-                    format='%(asctime)s %(name)-12s %(levelname)-8s %(message)s',
-                    datefmt='%m-%d %H:%M',
-                    filename='./log/myapp.log',
-                    filemode='w')
+logging.basicConfig(
+    level=logging.DEBUG,
+    format="%(asctime)s %(name)-12s %(levelname)-8s %(message)s",
+    datefmt="%m-%d %H:%M",
+    filename="./log/myapp.log",
+    filemode="w",
+)
 # define a Handler which writes INFO messages or higher to the sys.stderr
 console = logging.StreamHandler()
 console.setLevel(logging.INFO)
 # add the handler to the root logger
-logging.getLogger('').addHandler(console)
+logging.getLogger("").addHandler(console)
 
 
 app = FastAPI()
@@ -74,12 +77,37 @@ def convert_to_rss(url_input: str) -> str:
     )
 
 
+from urllib.parse import urlparse, parse_qs
+import re
+
+
 def extract_site(url_input: str) -> str:
-    """Format site portion of query to folder name for data"""
-    pattern = "[A-Za-z]+.com"
-    site = re.findall(pattern, url_input)
-    site_fmtd = re.sub("\\.", "_", site[1])
-    return site_fmtd
+    """Extract the domain name (without the TLD) from a 'site:' filter
+    inside a URL's query string, e.g.
+    'https://news.google.com/search?q=site%3Amarketwatch.com%20latest...'
+    -> 'marketwatch'
+    """
+    parsed = urlparse(url_input)
+    query_params = parse_qs(parsed.query)
+
+    q_value = query_params.get("q", [""])[0]
+
+    # find the site:<domain> token within the query text
+    match = re.search(r"site:([\w.-]+)", q_value)
+    if not match:
+        raise ValueError(f"No 'site:' filter found in query: {q_value!r}")
+
+    domain = match.group(1)
+
+    # strip a leading www. and the final TLD segment
+    if domain.startswith("www."):
+        domain = domain[4:]
+    # domain
+    domain_tld = domain.rsplit(".", 1)[0]
+    domain_suffix = domain.rsplit(".", 1)[1]
+    site = f"{domain_tld}_{domain_suffix}"
+
+    return site
 
 
 def recent_feed_data(path: str) -> str:
@@ -137,7 +165,7 @@ def feed_data(url_input: RssUrl) -> Any:
             "header": {"etag": "", "updated": ""},
             "items": [],
             "status": "no_new_data",  # explicit, not inferred from empty fields
-            "filename": ""
+            "filename": "",
         }
 
     file = recent_feed_data(path=out_dir)
