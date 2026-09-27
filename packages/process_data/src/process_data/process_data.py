@@ -4,19 +4,20 @@ from curl_cffi import requests
 from bs4 import BeautifulSoup
 from googlenewsdecoder import gnewsdecoder
 import ftfy
+import os
 
 
 class ProcessData:
-    def __init__(self):
-        self.path = "var/data/Anasdaq_com/"
-        self.filename = "20260918_001730.json"
-        self.file_path = Path(self.path) / self.filename
+    def __init__(self, file_path):
+        self.file_path = file_path
+        self.path = os.path.dirname(file_path)
+        self.filename = os.path.basename(file_path)
         self.processed_path = Path(self.path) / "processed" / self.filename
         self.document_path = (
             Path(self.path) / "document" / self.filename.replace(".json", ".txt")
         )
 
-    def get_feed_info(data):
+    def get_feed_info(self, data):
         new_dict = {"title": [], "published": [], "link": [], "feed_updated": ""}
         for key in data.keys():
             if key == "header":
@@ -28,7 +29,7 @@ class ProcessData:
                     new_dict["link"].append(item["link"])
                 return new_dict
 
-    def flat_json_text(new_dict):
+    def flat_json_text(self, new_dict):
         flat_dict = {"id": [], "text": [], "feed_updated": "", "link": []}
         title_text = []
         published_datetimes = []
@@ -58,15 +59,25 @@ class ProcessData:
         with open(self.processed_path, "w", encoding="utf-8") as f:
             json.dump(entries, f, indent=4)
 
-    def fetch_and_parse_url(actual_url):
+    def fetch_and_parse_url(self, actual_url):
         try:
             # Add the impersonate parameter to match a real browser fingerprint
             response = requests.get(actual_url, impersonate="chrome120", timeout=15)
+            # Check for 404, 500, or other HTTP error codes
+            if response.status_code != 200:
+                print(f"Skipping: Received bad status code ({response.status_code})")
+                return
+
             if response.status_code == 200:
                 soup = BeautifulSoup(
                     response.content.decode("utf-8", errors="ignore"), "html.parser"
                 )
 
+            # If it passes the checks, extract your data
+            html_content = response.text
+            print("Success: Page successfully grabbed.")
+
+            # ...BeautifulSoup parsing logic here ...
             # Get first paragraph text from the fetched page
             min_words = 40  # Minimum number of words in a sentence
             best_word_count = 0
@@ -91,17 +102,6 @@ class ProcessData:
 
             return best_paragraph.strip()
 
-            # Check for 404, 500, or other HTTP error codes
-            if response.status_code != 200:
-                print(f"Skipping: Received bad status code ({response.status_code})")
-                return
-
-            # If it passes the checks, extract your data
-            html_content = response.text
-            print("Success: Page successfully grabbed.")
-
-            # ... Your BeautifulSoup parsing logic here ...
-
         except requests.exceptions.Timeout:
             # Handles instances where the server hangs the connection
             print("Skipping: Connection timed out.")
@@ -110,7 +110,7 @@ class ProcessData:
             # Catch-all for network issues (like DNS failure or dropped sockets)
             print(f"Skipping: Network error occurred -> {e}")
 
-    def get_sample_text(entry):
+    def get_sample_text(self, entry):
         # Fetch the actual URL from the Google News link using gnewsdecoder
         with requests.Session() as session:
             session.headers.update(
@@ -131,17 +131,17 @@ class ProcessData:
                 actual_url = decoded_data.get("decoded_url")
                 print(f"Processing: {actual_url}")
                 if not actual_url.endswith(".pdf"):
-                    sample_text = fetch_and_parse_url(actual_url)
+                    sample_text = self.fetch_and_parse_url(actual_url)
                 else:
                     sample_text = "This is placeholder sample text for pdf content."  # Placeholder for PDF or non-HTML content
                 return f"This is the sample text for entry {entry['id']}: {sample_text}"
 
-    def create_document(self, document_path, processed_path, filename):
+    def create_document(self):
         self.document_path.parent.mkdir(parents=True, exist_ok=True)
         document = []
-        with open(processed_path, "r", encoding="utf-8") as f:
+        with open(self.processed_path, "r", encoding="utf-8") as f:
             processed_file = json.load(f)
-            with open(document_path, "w", encoding="utf-8") as f:
+            with open(self.document_path, "w", encoding="utf-8") as f:
                 for entry in processed_file:
                     text = f"{entry['text']} {entry.get('sample_text', '')}"
                     document.append(text)
@@ -168,7 +168,9 @@ class ProcessData:
 
 
 def main():
-    app = ProcessData()
+    app = ProcessData(
+        file_path=r"C:\Users\japfe\Documents\genai-pipeline-project\var\data\Anasdaq_com\20260918_001730.json"
+    )
     app.run()
 
 
