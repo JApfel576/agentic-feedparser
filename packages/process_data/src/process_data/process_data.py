@@ -147,6 +147,7 @@ class ProcessData:
                     document.append(text)
                 f.write("\n\n".join(document))
 
+
     def run(self):
         with open(self.file_path, encoding="utf-8") as f:
             data = json.load(f)
@@ -168,11 +169,9 @@ class ProcessData:
 
 
 def main():
-    app = ProcessData(
-        file_path=r"C:\Users\japfe\Documents\genai-pipeline-project\var\data\Anasdaq_com\20260918_001730.json"
-    )
+    # file_path = "C:/Users/japfe/Documents/genai-pipeline-project/services/fastapi_app/var/data/marketwatch_com/20260927_181214.json"
+    app = ProcessData()
     app.run()
-
 
 if __name__ == "__main__":
     main()

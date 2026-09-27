@@ -7,6 +7,8 @@ import re
 from feedpoller import FeedPoller
 from pathlib import Path
 import logging
+import os
+from dotenv import load_dotenv
 
 
 class Website(BaseModel):
@@ -50,6 +52,10 @@ console.setLevel(logging.INFO)
 # add the handler to the root logger
 logging.getLogger("").addHandler(console)
 
+
+load_dotenv()
+
+project_root = os.environ["PROJECT_ROOT"]
 
 app = FastAPI()
 
@@ -152,7 +158,7 @@ from fastapi import HTTPException
 def feed_data(url_input: RssUrl) -> Any:
     """Get data using created feed url and store in site specific folder"""
     site_folder = extract_site(url_input)
-    out_dir = f"var/data/{site_folder}"
+    out_dir = os.path.join(project_root, "var", "data", site_folder)
 
     rss_poller = FeedPoller(url=url_input, out_dir=out_dir)
     result = rss_poller.poll()
@@ -178,7 +184,8 @@ def feed_data(url_input: RssUrl) -> Any:
     try:
         with open(file) as f:
             data = json.load(f)
-            data["filename"] = file
+            # format generic - not windows specific
+            data["filename"] = Path(file).as_posix()
         logging.info(f"Loaded feed data from {file}")
         data["status"] = "ok"
         return data
