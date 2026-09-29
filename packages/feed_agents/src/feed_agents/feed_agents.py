@@ -13,10 +13,15 @@ from langgraph.types import Command, interrupt
 from langchain_core.runnables import RunnableConfig
 import requests
 import uuid
+import re
 
 from base_agents import DefaultAgent, make_supervisor_node, MessagesState
 from typing import Annotated, Callable, Literal, TypedDict
 import operator
+from process_data import ProcessData
+import logging
+
+logger = logging.getLogger(__name__)
 
 # Resolve the project root (two levels up from this file)
 ROOT = Path(__file__).resolve().parents[4]
@@ -87,7 +92,7 @@ class SubtaskPlan(BaseModel):
     """Initial decomposition of the user's request into subtasks."""
 
     subtasks: list[Subtask] = Field(
-        description="Each item: {'team': 'request_team'|'search_team', 'instruction': str}"
+        description="Each item: {'team': 'request_team'|'search_team'|'process_team', 'instruction': str}"
     )
 
 
@@ -111,6 +116,8 @@ class SupervisorState(MessagesState):
 search = GoogleSerperAPIWrapper()
 api_host = "http://127.0.0.1:8000"
 MAX_APPROVAL_ATTEMPTS = 3  # how many times human_approval may bounce back to agent before giving up and proceeding to supervisor
+DATA_DIR = os.path.join(ROOT, "var", "data")
+TS_FILE = re.compile(r"^\d{8}_\d{6}\.json$")
 
 
 def build_api_url(endpoint: Endpoint) -> str:
@@ -128,6 +135,15 @@ def normalize_site_operator(raw_site: str) -> str:
         path = parsed.path.rstrip("/")
         return f"{domain}{path}" if path else domain
     return raw_site.rstrip("/")
+
+
+def _slug(site: str) -> str:
+    """'https://www.Reuters.com/world' -> 'reuters_com'"""
+    site = site.strip().lower()
+    if "://" in site:
+        site = urlparse(site).netloc
+    site = re.sub(r"^www\.", "", site)
+    return re.sub(r"[^a-z0-9]+", "_", site).strip("_")
 
 
 @tool
@@ -220,6 +236,56 @@ def provide_site(site: str) -> dict:
         if site
         else {"status": "error", "message": "No site provided"}
     )
+
+
+@tool
+def find_data(site: str) -> str:
+    """Return the path of the most recent data file for a site (domain or URL)."""
+    site_dir = os.path.join(DATA_DIR, _slug(site))
+    if not os.path.isdir(site_dir):
+        return f"ERROR: no data directory for '{site}' (looked in {site_dir})"
+
+    files = [f for f in os.listdir(site_dir) if TS_FILE.match(f)]
+    if not files:
+        return f"ERROR: no timestamped .json files in {site_dir}"
+
+    return os.path.join(site_dir, max(files))  # YYYYMMDD_HHMMSS sorts lexically
+
+
+@tool
+def process_data(path: str) -> str:
+    """Process a data file found by find_response_file and write the output to disk.
+
+    Args:
+        path: Absolute path to a .json file under the data directory.
+
+    Returns:
+        The output file path on success, or an 'ERROR: ...' message.
+    """
+    if not path:
+        return "ERROR: path is not populated"
+
+    real = os.path.realpath(path)
+    root = os.path.realpath(DATA_DIR)
+    try:
+        if os.path.commonpath([real, root]) != root:
+            return f"ERROR: path is outside the data directory: {path}"
+    except ValueError:  # different drives on Windows
+        return f"ERROR: path is outside the data directory: {path}"
+    if not os.path.isfile(real):
+        return f"ERROR: file not found: {path}"
+
+    try:
+        output_file = ProcessData(real)
+    except Exception as e:
+        logger.exception("process_file failed for %s", real)
+        return f"ERROR: processing failed for {path}: {type(e).__name__}: {e}"
+
+    if not output_file or not os.path.isfile(output_file):
+        return f"ERROR: processing finished but no output file was found for {path}"
+
+    logger.info("process_file wrote %s", output_file)
+    return f"The file was successfully processed. Output: {output_file}"
 
 
 def request_team(
@@ -476,6 +542,58 @@ def search_team(
     return builder.compile()
 
 
+def process_team(
+    state: SupervisorState, model: str, config: RunnableConfig | None
+) -> Callable[[SupervisorState], Command[Literal["supervisor"]]]:
+    def processing_agent(state: SupervisorState) -> Command[Literal["supervisor"]]:
+        print(
+            "PROCESSING_AGENT ENTERED, dispatched_agents_run:",
+            state.get("dispatched_agents_run"),
+        )
+        tools = [find_data, process_data]
+        system_prompt = """You are a processing agent tasked with finding a file and processing it. Use the tools provided to carry out your tasks."""
+        instruction = state["current_instruction"]
+        search_agent = DefaultAgent(
+            state=state,
+            model=model,
+            tools=tools,
+            schema=MessagesState,
+            config=config,
+            system_prompt=system_prompt,
+        ).graph.invoke({"messages": [instruction]}, config=config)
+        result = search_agent["messages"][-1]  # structured output only
+        return Command(
+            update={
+                "messages": [
+                    AIMessage(
+                        content=f"Processing completed successfully. Data: {result.model_dump()}",
+                        name="processing",
+                    )
+                ],
+                "dispatched_agents_run": state.get("dispatched_agents_run", [])
+                + ["processor"],
+            },
+            goto="superivsor",
+        )
+
+    agent_roles = ["processor"]  # used to direct supervisor to agent(s)
+    supervisor_node = make_supervisor_node(
+        model,
+        agent_roles,
+        config=config,
+        additional_instructions="After request team completes. Process the data returned and stored.",
+        team_name="process_team",
+    )
+
+    builder = StateGraph(SupervisorState)
+    builder.add_node(
+        "processor", processing_agent
+    )  # agent subgraph node, returns updates to supervisor
+    builder.add_node("supervisor", supervisor_node)
+    builder.set_entry_point("supervisor")
+    return builder.compile()
+
+
 def build_top_graph(model_str, config):
     model = init_chat_model(model_str, temperature=0, max_retries=3, timeout=30)
     PLAN_PROMPT = (
@@ -484,6 +602,7 @@ def build_top_graph(model_str, config):
         "- 'request_team': checks API health and provides site urls as data to API.\n"
         "- 'search_team': finds relevant sites for a topic and returns full Google "
         "News search URLs.\n\n"
+        "- 'process_team': Processes stored data returned by request team. \n\n"
         "A single team may own multiple subtasks — list them separately, each with "
         "self-contained instruction text covering only that piece of the request."
     )
@@ -517,7 +636,7 @@ def build_top_graph(model_str, config):
 
     def supervisor_node(
         state: SupervisorState, config: RunnableConfig
-    ) -> Command[Literal["request_team", "search_team", "__end__"]]:
+    ) -> Command[Literal["request_team", "search_team", "process_team", "__end__"]]:
         # Phase 1: plan subtasks once, on first entry
         if not state.get("subtasks_planned"):
             messages = [SystemMessage(content=PLAN_PROMPT)] + state["messages"]
@@ -605,12 +724,19 @@ def build_top_graph(model_str, config):
         "search_team",
         search_team(state=None, model=model, config=config),
     )
+    builder.add_node(
+        "process_team",
+        search_team(state=None, model=model, config=config),
+    )
     builder.add_node("mark_subtask_complete", mark_subtask_complete)
 
     builder.set_entry_point("supervisor")
     builder.add_edge("search_team", "mark_subtask_complete")
     builder.add_edge(
         "request_team", "mark_subtask_complete"
+    )  # request_team needs this too
+    builder.add_edge(
+        "process_team", "mark_subtask_complete"
     )  # request_team needs this too
     builder.add_edge("mark_subtask_complete", "supervisor")
 
