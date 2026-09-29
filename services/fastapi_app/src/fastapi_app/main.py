@@ -34,6 +34,14 @@ class Model(BaseModel):
     filename: str
 
 
+load_dotenv()
+
+project_root = os.environ["PROJECT_ROOT"]
+
+log_dir = os.path.join(project_root, "services", "fastapi_app", "log")
+os.makedirs(log_dir, exist_ok=True)
+log_file = os.path.join(log_dir, "myapp.log")
+
 # Source - https://stackoverflow.com/a/53496263
 # Posted by Orly
 # Retrieved 2026-09-24, License - CC BY-SA 4.0
@@ -43,19 +51,15 @@ logging.basicConfig(
     level=logging.DEBUG,
     format="%(asctime)s %(name)-12s %(levelname)-8s %(message)s",
     datefmt="%m-%d %H:%M",
-    filename="./log/myapp.log",
+    filename=log_file,
     filemode="w",
 )
+
 # define a Handler which writes INFO messages or higher to the sys.stderr
 console = logging.StreamHandler()
 console.setLevel(logging.INFO)
 # add the handler to the root logger
 logging.getLogger("").addHandler(console)
-
-
-load_dotenv()
-
-project_root = os.environ["PROJECT_ROOT"]
 
 app = FastAPI()
 
