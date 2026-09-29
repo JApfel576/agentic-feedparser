@@ -167,6 +167,8 @@ class ProcessData:
 
         self.create_document(self.processed_path, self.document_path, self.filename)
 
+        
+
 
 def main():
     # file_path = "C:/Users/japfe/Documents/genai-pipeline-project/services/fastapi_app/var/data/marketwatch_com/20260927_181214.json"

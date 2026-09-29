@@ -95,6 +95,7 @@ members = [
     "packages/feed_agents",
     "packages/base_agents",
     "packages/process_data",
+    "services/fastapi_app/src",
 ]
 
 [tool.uv.sources]
