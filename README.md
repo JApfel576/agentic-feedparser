@@ -87,16 +87,21 @@ This approach avoids scraping entire sites unless the metadata indicates the art
 │       ├── README.md
 │       ├── pyproject.toml
 │       └── src
-│           └── process_data
-│               ├── __init__.py
-│               └── process_data.py
+│           ├── process_data
+│           │   ├── __init__.py
+│           │   └── process_data.py
+│           └── process_data.egg-info
+│               ├── PKG-INFO
+│               ├── SOURCES.txt
+│               ├── dependency_links.txt
+│               ├── requires.txt
+│               └── top_level.txt
 ├── pyproject.toml
 ├── query.py
 ├── services
 │   └── fastapi_app
 │       ├── log
 │       │   └── myapp.log
-│       ├── pyproject.toml
 │       └── src
 │           └── fastapi_app
 │               └── main.py
@@ -117,6 +122,6 @@ This approach avoids scraping entire sites unless the metadata indicates the art
             ├── 20260515_183846.json
             └── state.json
 
-29 directories, 47 files
+30 directories, 51 files
 ```
 <!-- TREE_END -->
