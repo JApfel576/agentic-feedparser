@@ -5,6 +5,9 @@ from bs4 import BeautifulSoup
 from googlenewsdecoder import gnewsdecoder
 import ftfy
 import os
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 class ProcessData:
@@ -16,6 +19,8 @@ class ProcessData:
         self.document_path = (
             Path(self.path) / "document" / self.filename.replace(".json", ".txt")
         )
+        self.processed_path.parent.mkdir(parents=True, exist_ok=True)
+        self.document_path.parent.mkdir(parents=True, exist_ok=True)
 
     def get_feed_info(self, data):
         new_dict = {"title": [], "published": [], "link": [], "feed_updated": ""}
@@ -147,33 +152,60 @@ class ProcessData:
                     document.append(text)
                 f.write("\n\n".join(document))
 
+    def run(self) -> dict:
+        result = {"ok": False, "error": None, "entries": 0, "sample_failures": []}
 
-    def run(self):
-        with open(self.file_path, encoding="utf-8") as f:
-            data = json.load(f)
+        try:
+            with open(self.file_path, encoding="utf-8") as f:
+                data = json.load(f)
+        except (OSError, json.JSONDecodeError) as exc:
+            logger.exception("could not load %s", self.file_path)
+            result["error"] = f"load failed: {type(exc).__name__}: {exc}"
+            return result
 
-        new_dict = self.get_feed_info(data)
-        flat_items = self.flat_json_text(new_dict)
+        try:
+            new_dict = self.get_feed_info(data)
+            flat_items = self.flat_json_text(new_dict)
+            entries = [
+                {"id": i, "text": t, "link": link}
+                for i, t, link in zip(
+                    flat_items["id"], flat_items["text"], flat_items["link"]
+                )
+            ]
+        except (KeyError, TypeError, AttributeError) as exc:
+            logger.exception("unexpected feed structure")
+            result["error"] = f"transform failed: {type(exc).__name__}: {exc}"
+            return result
 
-        entries = [
-            {"id": i, "text": t, "link": l}
-            for i, t, l in zip(flat_items["id"], flat_items["text"], flat_items["link"])
-        ]
+        result["entries"] = len(entries)
+        if not entries:
+            result["error"] = "no entries found"
+            return result
 
-        self.processed_data(entries, self.processed_path, self.filename)
+        try:
+            self.processed_data(entries, self.processed_path, self.filename)
+        except OSError as exc:
+            logger.exception("failed writing processed data")
+            result["error"] = f"write failed: {type(exc).__name__}: {exc}"
+            return result
 
-        for entry in entries:
-            entry["sample_text"] = self.get_sample_text(entry)
+        for entry in entries[:10]:
+            try:
+                entry["sample_text"] = self.get_sample_text(entry)
+            except Exception as exc:
+                logger.exception("get_sample_text failed for id=%s", entry.get("id"))
+                entry["sample_text"] = None
+                result["sample_failures"].append(
+                    {"id": entry.get("id"), "error": f"{type(exc).__name__}: {exc}"}
+                )
 
-        self.create_document(self.processed_path, self.document_path, self.filename)
+        try:
+            self.create_document()
+        except Exception as exc:
+            logger.exception("failed creating document")
+            result["error"] = f"document failed: {type(exc).__name__}: {exc}"
+            return result
 
-        
-
-
-def main():
-    # file_path = "C:/Users/japfe/Documents/genai-pipeline-project/services/fastapi_app/var/data/marketwatch_com/20260927_181214.json"
-    app = ProcessData()
-    app.run()
-
-if __name__ == "__main__":
-    main()
+        result["ok"] = True
+        result["document_path"] = self.document_path
+        return result
