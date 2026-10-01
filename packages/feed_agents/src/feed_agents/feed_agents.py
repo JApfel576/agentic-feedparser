@@ -14,6 +14,7 @@ from langchain_core.runnables import RunnableConfig
 import requests
 import uuid
 import re
+from urllib.parse import urlparse
 
 from base_agents import DefaultAgent, make_supervisor_node, MessagesState
 from typing import Annotated, Callable, Literal, TypedDict
@@ -21,11 +22,34 @@ import operator
 from process_data import ProcessData
 import logging
 
-logger = logging.getLogger(__name__)
-
 # Resolve the project root (two levels up from this file)
 ROOT = Path(__file__).resolve().parents[4]
 load_dotenv(ROOT / ".env")
+
+project_root = os.environ["PROJECT_ROOT"]
+
+log_dir = os.path.join(project_root, "packages", "feed_agents", "log")
+os.makedirs(log_dir, exist_ok=True)
+log_file = os.path.join(log_dir, "myapp.log")
+
+# Source - https://stackoverflow.com/a/53496263
+# Posted by Orly
+# Retrieved 2026-09-24, License - CC BY-SA 4.0
+
+# set up logging to file
+logging.basicConfig(
+    level=logging.DEBUG,
+    format="%(asctime)s %(name)-12s %(levelname)-8s %(message)s",
+    datefmt="%m-%d %H:%M",
+    filename=log_file,
+    filemode="w",
+)
+
+# define a Handler which writes INFO messages or higher to the sys.stderr
+console = logging.StreamHandler()
+console.setLevel(logging.INFO)
+# add the handler to the root logger
+logging.getLogger("").addHandler(console)
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 SERPER_API_KEY = os.getenv("SERPER_API_KEY")
@@ -75,7 +99,7 @@ class APISiteEndpoint(BaseModel):
 
 class Subtask(TypedDict):
     id: str
-    team: Literal["request_team", "search_team"]
+    team: Literal["request_team", "search_team", "process_team"]
     instruction: str
     status: Literal["pending", "completed"]
 
@@ -122,9 +146,6 @@ TS_FILE = re.compile(r"^\d{8}_\d{6}\.json$")
 
 def build_api_url(endpoint: Endpoint) -> str:
     return f"{api_host}{endpoint.value}"
-
-
-from urllib.parse import urlparse
 
 
 def normalize_site_operator(raw_site: str) -> str:
@@ -227,9 +248,6 @@ def provide_site(site: str) -> dict:
             param_site="url_input",
             site=converted_url.get("response"),
         )
-        # if isinstance(request_data, dict):
-        #     return request_data
-        # raise TypeError(f"Expected dict, got {type(request_data).__name__}")
 
     return (
         fetch_site_data(site)
@@ -278,13 +296,13 @@ def process_data(path: str) -> str:
     try:
         output_file = ProcessData(real)
     except Exception as e:
-        logger.exception("process_file failed for %s", real)
+        logging.exception("process_file failed for %s", real)
         return f"ERROR: processing failed for {path}: {type(e).__name__}: {e}"
 
     if not output_file or not os.path.isfile(output_file):
         return f"ERROR: processing finished but no output file was found for {path}"
 
-    logger.info("process_file wrote %s", output_file)
+    logging.info("process_file wrote %s", output_file)
     return f"The file was successfully processed. Output: {output_file}"
 
 
@@ -415,16 +433,19 @@ def request_team(
             return Command(update=update, goto="supervisor")
         if attempts >= MAX_APPROVAL_ATTEMPTS:
             # Bound the reject cycle: without this, agent <-> human_approval never settles.
-            update["messages"] = [
-                AIMessage(
-                    content=(
-                        f"API call was not approved after {attempts} attempts; "
-                        "giving up on the request."
-                    ),
-                    name="human_approval",
-                )
-            ]
-            return Command(update=update, goto="supervisor")
+            if is_approved:
+                return Command(update=update, goto="supervisor")
+            else:
+                update["messages"] = [
+                    AIMessage(
+                        content=(
+                            f"API call was not approved after {attempts} attempts; "
+                            "giving up on the request."
+                        ),
+                        name="human_approval",
+                    )
+                ]
+                return Command(update=update, goto="supervisor")
         return Command(update=update, goto="site_requester")
 
     builder = StateGraph(SupervisorState)
@@ -543,38 +564,56 @@ def search_team(
 
 
 def process_team(
-    state: SupervisorState, model: str, config: RunnableConfig | None
+    state: SupervisorState, model: str, config: RunnableConfig | None = None
 ) -> Callable[[SupervisorState], Command[Literal["supervisor"]]]:
     def processing_agent(state: SupervisorState) -> Command[Literal["supervisor"]]:
-        print(
+        logging.info(
             "PROCESSING_AGENT ENTERED, dispatched_agents_run:",
             state.get("dispatched_agents_run"),
         )
         tools = [find_data, process_data]
-        system_prompt = """You are a processing agent tasked with finding a file and processing it. Use the tools provided to carry out your tasks."""
+        system_prompt = """You are a processing agent tasked with finding a file and processing it. Use the tools provided to carry out your tasks. First call find_data to get the file path, then call process_data with that exact path."""
         instruction = state["current_instruction"]
-        search_agent = DefaultAgent(
-            state=state,
-            model=model,
-            tools=tools,
-            schema=MessagesState,
-            config=config,
-            system_prompt=system_prompt,
-        ).graph.invoke({"messages": [instruction]}, config=config)
-        result = search_agent["messages"][-1]  # structured output only
+        try:
+            processor_agent = DefaultAgent(
+                state=state,
+                model=model,
+                tools=tools,
+                schema=AIMessage.model_dump(),
+                config=config,
+                system_prompt=system_prompt,
+            ).graph.invoke({"messages": [instruction]}, config=config)
+            result = processor_agent["messages"][-1]  # structured output only
+            if result is None:
+                content = (
+                    "Processing failed: process_data was never called or returned "
+                    f"no report. Agent said: {result.content}"
+                )
+            elif result.get("ok"):
+                content = (
+                    f"Processing completed successfully. "
+                    f"entries={result['entries']}, "
+                    f"sample_failures={len(result['sample_failures'])}"
+                )
+            else:
+                content = f"Processing failed: {result.get('error')}"
+        except Exception as exc:
+            logging.exception("processing agent crashed")
+            content = f"Processing failed: {type(exc).__name__}: {exc}"
         return Command(
             update={
                 "messages": [
                     AIMessage(
-                        content=f"Processing completed successfully. Data: {result.model_dump()}",
-                        name="processing",
+                        content=f"Processing completed successfully. Data: {result.content}",
+                        name="processor",
                     )
                 ],
                 "dispatched_agents_run": state.get("dispatched_agents_run", [])
                 + ["processor"],
             },
-            goto="superivsor",
+            goto="supervisor",
         )
+        return processing_agent
 
     agent_roles = ["processor"]  # used to direct supervisor to agent(s)
     supervisor_node = make_supervisor_node(
@@ -726,7 +765,7 @@ def build_top_graph(model_str, config):
     )
     builder.add_node(
         "process_team",
-        search_team(state=None, model=model, config=config),
+        process_team(state=None, model=model, config=config),
     )
     builder.add_node("mark_subtask_complete", mark_subtask_complete)
 
@@ -770,7 +809,7 @@ if __name__ == "__main__":
         {
             "messages": [
                 HumanMessage(
-                    content=f"Check the health of the API then provide full URLs prefixed as Google News search queries for relevant sites for {topic}. Finally provide those urls from previous step to the API via provide site tool."
+                    content=f"Check the health of the API then provide full URLs prefixed as Google News search queries for relevant sites for {topic}. Next, provide those urls from previous step to the API via provide site tool. Lastly, process that data with the process_data team."
                 )
             ]
         }
