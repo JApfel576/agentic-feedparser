@@ -70,7 +70,8 @@ This approach avoids scraping entire sites unless the metadata indicates the art
 │   │   └── src
 │   │       └── feed_agents
 │   │           ├── __init__.py
-│   │           └── feed_agents.py
+│   │           ├── feed_agents.py
+│   │           └── temp.py
 │   ├── feedpoller
 │   │   ├── pyproject.toml
 │   │   └── src
@@ -122,6 +123,6 @@ This approach avoids scraping entire sites unless the metadata indicates the art
             ├── 20260515_183846.json
             └── state.json
 
-30 directories, 51 files
+30 directories, 52 files
 ```
 <!-- TREE_END -->
