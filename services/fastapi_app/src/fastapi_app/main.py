@@ -73,18 +73,32 @@ def check_url(url_input: str) -> str:
     return url_input
 
 
+import re
+from urllib.parse import parse_qs, urlparse, urlunparse
+
+_SITE_Q = re.compile(
+    r"(?:^|\s)site:(?P<domain>[a-z0-9-]+(?:\.[a-z0-9-]+)+)(?P<path>/\S*)?(?=\s|$)",
+    re.IGNORECASE,
+)
+
+
 def convert_to_rss(url_input: str) -> str:
-    """Create url from one given for rss feed"""
-    site = Website(url=url_input)
+    """Convert a Google News site-search URL to its RSS equivalent."""
+    parsed = urlparse(url_input)
 
-    pattern = r"q=site(\:|%3A)(?:%20|\s)?[a-z0-9.-]+(\.com).*"
-    if not re.match(pattern, str(site.url.query)):
-        raise ValueError("query not expected format for google news site search")
+    if parsed.hostname != "news.google.com":
+        raise ValueError(f"expected news.google.com, got {parsed.hostname!r}")
 
-    path_str = "/rss" + site.url.path
-    return urlunparse(
-        (site.url.scheme, site.url.host, path_str, "", site.url.query, "")
-    )
+    if parsed.path.startswith("/rss/"):  # already converted
+        return url_input
+    if parsed.path != "/search":
+        raise ValueError(f"unexpected path {parsed.path!r}")
+
+    q = parse_qs(parsed.query).get("q", [""])[0]
+    if not _SITE_Q.search(q):
+        raise ValueError("query missing a site: filter")
+
+    return urlunparse(parsed._replace(path="/rss" + parsed.path))
 
 
 from urllib.parse import urlparse, parse_qs
