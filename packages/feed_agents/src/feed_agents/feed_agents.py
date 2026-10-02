@@ -14,7 +14,8 @@ from langchain_core.runnables import RunnableConfig
 import requests
 import uuid
 import re
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse, urlunparse
+import json
 
 from base_agents import DefaultAgent, make_supervisor_node, MessagesState
 from typing import Annotated, Callable, Literal, TypedDict
@@ -22,13 +23,22 @@ import operator
 from process_data import ProcessData
 import logging
 
-# Resolve the project root (two levels up from this file)
+# Resolve the project root
 ROOT = Path(__file__).resolve().parents[4]
 load_dotenv(ROOT / ".env")
 
-project_root = os.environ["PROJECT_ROOT"]
+PROJECT_ROOT = Path(os.environ.get("PROJECT_ROOT", ROOT))
 
-log_dir = os.path.join(project_root, "packages", "feed_agents", "log")
+DATA_DIR = os.path.join(PROJECT_ROOT, "var", "data")
+TS_FILE = re.compile(r"^\d{8}_\d{6}\.json$")
+
+
+_SITE_Q = re.compile(
+    r"(?:^|\s)site:(?P<domain>[a-z0-9-]+(?:\.[a-z0-9-]+)+)(?P<path>/\S*)?(?=\s|$)",
+    re.IGNORECASE,
+)
+
+log_dir = os.path.join(PROJECT_ROOT, "packages", "feed_agents", "log")
 os.makedirs(log_dir, exist_ok=True)
 log_file = os.path.join(log_dir, "myapp.log")
 
@@ -158,15 +168,6 @@ def normalize_site_operator(raw_site: str) -> str:
     return raw_site.rstrip("/")
 
 
-def _slug(site: str) -> str:
-    """'https://www.Reuters.com/world' -> 'reuters_com'"""
-    site = site.strip().lower()
-    if "://" in site:
-        site = urlparse(site).netloc
-    site = re.sub(r"^www\.", "", site)
-    return re.sub(r"[^a-z0-9]+", "_", site).strip("_")
-
-
 @tool
 def relevant_site(topic: str) -> dict:
     """Provide a relevant link for input topic using google serper"""
@@ -256,7 +257,19 @@ def provide_site(site: str) -> dict:
     )
 
 
-@tool
+def _slug(site: str) -> str:
+    """'https://news.google.com/search?q=site:reuters.com%20stock%20market' -> 'reuters_com'"""
+
+    parsed = urlparse(site)
+    q = parse_qs(parsed.query).get("q", [""])[0]
+    m = _SITE_Q.search(q)
+    if not m:
+        raise ValueError("query missing a site: filter")
+    return m["domain"].lower().removeprefix("www.").replace(".", "_")
+    print(q)
+    return q
+
+
 def find_data(site: str) -> str:
     """Return the path of the most recent data file for a site (domain or URL)."""
     site_dir = os.path.join(DATA_DIR, _slug(site))
@@ -267,10 +280,10 @@ def find_data(site: str) -> str:
     if not files:
         return f"ERROR: no timestamped .json files in {site_dir}"
 
+    print(os.path.join(site_dir, max(files)))
     return os.path.join(site_dir, max(files))  # YYYYMMDD_HHMMSS sorts lexically
 
 
-@tool
 def process_data(path: str) -> str:
     """Process a data file found by find_response_file and write the output to disk.
 
@@ -293,17 +306,14 @@ def process_data(path: str) -> str:
     if not os.path.isfile(real):
         return f"ERROR: file not found: {path}"
 
-    try:
-        output_file = ProcessData(real)
-    except Exception as e:
-        logging.exception("process_file failed for %s", real)
-        return f"ERROR: processing failed for {path}: {type(e).__name__}: {e}"
+    report = ProcessData(file_path=real).run()
+    if not report.get("ok"):
+        logging.error("process_file failed for %s: %s", real, report.get("error"))
 
-    if not output_file or not os.path.isfile(output_file):
-        return f"ERROR: processing finished but no output file was found for {path}"
+    logging.info("process_file wrote %s", report)
+    return f"The file was successfully processed. Output: {report}"
 
-    logging.info("process_file wrote %s", output_file)
-    return f"The file was successfully processed. Output: {output_file}"
+    return report.get("document_path")
 
 
 def request_team(
@@ -564,56 +574,55 @@ def search_team(
 
 
 def process_team(
-    state: SupervisorState, model: str, config: RunnableConfig | None = None
+    state: SupervisorState, model, config: RunnableConfig | None
 ) -> Callable[[SupervisorState], Command[Literal["supervisor"]]]:
     def processing_agent(state: SupervisorState) -> Command[Literal["supervisor"]]:
-        logging.info(
-            "PROCESSING_AGENT ENTERED, dispatched_agents_run:",
-            state.get("dispatched_agents_run"),
-        )
-        tools = [find_data, process_data]
-        system_prompt = """You are a processing agent tasked with finding a file and processing it. Use the tools provided to carry out your tasks. First call find_data to get the file path, then call process_data with that exact path."""
-        instruction = state["current_instruction"]
-        try:
-            processor_agent = DefaultAgent(
-                state=state,
-                model=model,
-                tools=tools,
-                schema=AIMessage.model_dump(),
-                config=config,
-                system_prompt=system_prompt,
-            ).graph.invoke({"messages": [instruction]}, config=config)
-            result = processor_agent["messages"][-1]  # structured output only
-            if result is None:
-                content = (
-                    "Processing failed: process_data was never called or returned "
-                    f"no report. Agent said: {result.content}"
-                )
-            elif result.get("ok"):
-                content = (
-                    f"Processing completed successfully. "
-                    f"entries={result['entries']}, "
-                    f"sample_failures={len(result['sample_failures'])}"
-                )
-            else:
-                content = f"Processing failed: {result.get('error')}"
-        except Exception as exc:
-            logging.exception("processing agent crashed")
-            content = f"Processing failed: {type(exc).__name__}: {exc}"
+        logging.info("processing agent entered")
+
+        sites = (state.get("search_results") or {}).get("sites") or []
+        if not sites:
+            content = "Processing skipped: no sites in search results."
+        else:
+            site = sites[0]
+            try:
+                # Step 1: locate the file
+                file_path = find_data(site)  # match find_data's arg name
+                if (
+                    not file_path
+                    or not isinstance(file_path, str)
+                    or file_path.startswith("ERROR")
+                ):
+                    raise FileNotFoundError(
+                        f"find_data found no file for {site!r}: {file_path!r}"
+                    )
+
+                # Step 2: process it
+                raw = process_data(file_path)
+                report = json.loads(raw) if isinstance(raw, str) else raw
+
+                if report.get("ok"):
+                    content = (
+                        f"Processing completed successfully. file={file_path}, "
+                        f"entries={report['entries']}, "
+                        f"sample_failures={len(report['sample_failures'])}, "
+                        f"output={report.get('document_path')}"
+                    )
+                else:
+                    content = (
+                        f"Processing failed for {file_path}: {report.get('error')}"
+                    )
+            except Exception as exc:
+                logging.exception("processing agent failed")
+                content = f"Processing failed: {type(exc).__name__}: {exc}"
+
         return Command(
             update={
-                "messages": [
-                    AIMessage(
-                        content=f"Processing completed successfully. Data: {result.content}",
-                        name="processor",
-                    )
-                ],
+                "messages": [AIMessage(content=content, name="processor")],
                 "dispatched_agents_run": state.get("dispatched_agents_run", [])
                 + ["processor"],
             },
             goto="supervisor",
         )
-        return processing_agent
 
     agent_roles = ["processor"]  # used to direct supervisor to agent(s)
     supervisor_node = make_supervisor_node(
