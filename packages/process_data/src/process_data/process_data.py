@@ -7,11 +7,11 @@ import ftfy
 import os
 import logging
 
-logger = logging.getLogger(__name__)
+# logger = logging.getLogger(__name__)
 
 
 class ProcessData:
-    def __init__(self, file_path):
+    def __init__(self, file_path, logger_name: str, logger: logging.Logger | None = None):
         self.file_path = file_path
         self.path = os.path.dirname(file_path)
         self.filename = os.path.basename(file_path)
@@ -21,6 +21,8 @@ class ProcessData:
         )
         self.processed_path.parent.mkdir(parents=True, exist_ok=True)
         self.document_path.parent.mkdir(parents=True, exist_ok=True)
+        self.logger_name = logger_name
+        self.logger = logger or logging.getLogger(logger_name)
 
     def get_feed_info(self, data):
         new_dict = {"title": [], "published": [], "link": [], "feed_updated": ""}
@@ -159,7 +161,7 @@ class ProcessData:
             with open(self.file_path, encoding="utf-8") as f:
                 data = json.load(f)
         except (OSError, json.JSONDecodeError) as exc:
-            logger.exception("could not load %s", self.file_path)
+            self.logger.exception("could not load %s", self.file_path)
             result["error"] = f"load failed: {type(exc).__name__}: {exc}"
             return result
 
@@ -173,7 +175,7 @@ class ProcessData:
                 )
             ]
         except (KeyError, TypeError, AttributeError) as exc:
-            logger.exception("unexpected feed structure")
+            self.logger.exception("unexpected feed structure")
             result["error"] = f"transform failed: {type(exc).__name__}: {exc}"
             return result
 
@@ -185,15 +187,15 @@ class ProcessData:
         try:
             self.processed_data(entries, self.processed_path, self.filename)
         except OSError as exc:
-            logger.exception("failed writing processed data")
+            self.logger.exception("failed writing processed data")
             result["error"] = f"write failed: {type(exc).__name__}: {exc}"
             return result
-
+        # limit to 10 entries
         for entry in entries[:10]:
             try:
                 entry["sample_text"] = self.get_sample_text(entry)
             except Exception as exc:
-                logger.exception("get_sample_text failed for id=%s", entry.get("id"))
+                self.logger.exception("get_sample_text failed for id=%s", entry.get("id"))
                 entry["sample_text"] = None
                 result["sample_failures"].append(
                     {"id": entry.get("id"), "error": f"{type(exc).__name__}: {exc}"}
@@ -202,7 +204,7 @@ class ProcessData:
         try:
             self.create_document()
         except Exception as exc:
-            logger.exception("failed creating document")
+            self.logger.exception("failed creating document")
             result["error"] = f"document failed: {type(exc).__name__}: {exc}"
             return result
 
