@@ -38,29 +38,6 @@ _SITE_Q = re.compile(
     re.IGNORECASE,
 )
 
-log_dir = os.path.join(PROJECT_ROOT, "packages", "feed_agents", "log")
-os.makedirs(log_dir, exist_ok=True)
-log_file = os.path.join(log_dir, "myapp.log")
-
-# Source - https://stackoverflow.com/a/53496263
-# Posted by Orly
-# Retrieved 2026-09-24, License - CC BY-SA 4.0
-
-# set up logging to file
-logging.basicConfig(
-    level=logging.DEBUG,
-    format="%(asctime)s %(name)-12s %(levelname)-8s %(message)s",
-    datefmt="%m-%d %H:%M",
-    filename=log_file,
-    filemode="w",
-)
-
-# define a Handler which writes INFO messages or higher to the sys.stderr
-console = logging.StreamHandler()
-console.setLevel(logging.INFO)
-# add the handler to the root logger
-logging.getLogger("").addHandler(console)
-
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 SERPER_API_KEY = os.getenv("SERPER_API_KEY")
 
@@ -152,6 +129,28 @@ api_host = "http://127.0.0.1:8000"
 MAX_APPROVAL_ATTEMPTS = 3  # how many times human_approval may bounce back to agent before giving up and proceeding to supervisor
 DATA_DIR = os.path.join(ROOT, "var", "data")
 TS_FILE = re.compile(r"^\d{8}_\d{6}\.json$")
+
+
+def setup_logging(project_root: str) -> None:
+    log_dir = os.path.join(project_root, "packages", "feed_agents", "log")
+    os.makedirs(log_dir, exist_ok=True)
+    log_file = os.path.join(log_dir, "myapp.log")
+
+    # set up logging to file
+    logging.basicConfig(
+        level=logging.DEBUG,
+        format="%(asctime)s %(name)-12s %(levelname)-8s %(message)s",
+        datefmt="%m-%d %H:%M",
+        filename=log_file,
+        filemode="a",
+        force=True,  # replace any handlers already on the root logger
+    )
+
+    # define a Handler which writes INFO messages or higher to sys.stderr
+    console = logging.StreamHandler()
+    console.setLevel(logging.INFO)
+    # add the handler to the root logger
+    logging.getLogger("").addHandler(console)
 
 
 def build_api_url(endpoint: Endpoint) -> str:
@@ -293,6 +292,13 @@ def process_data(path: str) -> str:
     Returns:
         The output file path on success, or an 'ERROR: ...' message.
     """
+    setup_logging(PROJECT_ROOT)
+    logger = logging.getLogger(__name__)
+    print("pid:", os.getpid(), "| name:", __name__, "| disabled:", logger.disabled,
+        "| propagate:", logger.propagate, "| effective level:", logger.getEffectiveLevel())
+    print("root handlers:", logging.getLogger().handlers)
+    logger.warning("probe from agent")
+
     if not path:
         return "ERROR: path is not populated"
 
@@ -309,11 +315,11 @@ def process_data(path: str) -> str:
     report = ProcessData(file_path=real).run()
     if not report.get("ok"):
         logging.error("process_file failed for %s: %s", real, report.get("error"))
+    else:
+        logging.info("process_file wrote %s", report)
+        return f"The file was successfully processed. Output: {report}"
 
-    logging.info("process_file wrote %s", report)
-    return f"The file was successfully processed. Output: {report}"
-
-    return report.get("document_path")
+        return report
 
 
 def request_team(
@@ -597,8 +603,7 @@ def process_team(
                     )
 
                 # Step 2: process it
-                raw = process_data(file_path)
-                report = json.loads(raw) if isinstance(raw, str) else raw
+                report = process_data(file_path, logger_name="feed_agents", logger=logging.getLogger("feed_agents")).run()
 
                 if report.get("ok"):
                     content = (
