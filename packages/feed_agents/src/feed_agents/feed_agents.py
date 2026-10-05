@@ -312,14 +312,12 @@ def process_data(path: str) -> str:
     if not os.path.isfile(real):
         return f"ERROR: file not found: {path}"
 
-    report = ProcessData(file_path=real).run()
+    report = ProcessData(file_path=real, logger_name=logger.name, logger=logger).run()
     if not report.get("ok"):
         logging.error("process_file failed for %s: %s", real, report.get("error"))
     else:
         logging.info("process_file wrote %s", report)
-        return f"The file was successfully processed. Output: {report}"
-
-        return report
+        return report.get("report")
 
 
 def request_team(
@@ -603,7 +601,7 @@ def process_team(
                     )
 
                 # Step 2: process it
-                report = process_data(file_path, logger_name="feed_agents", logger=logging.getLogger("feed_agents")).run()
+                report = process_data(file_path)  # match process_data's arg name
 
                 if report.get("ok"):
                     content = (
@@ -798,6 +796,7 @@ def build_top_graph(model_str, config):
 
 
 if __name__ == "__main__":
+    setup_logging(PROJECT_ROOT)
     topic = "latest reliable news source affecting stock market"
     # recursion_limit kept low so a routing regression surfaces immediately instead of
     # burning supersteps of LLM calls — but not so low that a legitimate run trips it.
