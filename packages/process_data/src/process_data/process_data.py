@@ -6,8 +6,8 @@ from googlenewsdecoder import gnewsdecoder
 import ftfy
 import os
 import logging
-
-# logger = logging.getLogger(__name__)
+from email.utils import parsedate_to_datetime
+from datetime import datetime, timezone
 
 
 class ProcessData:
@@ -24,17 +24,38 @@ class ProcessData:
         self.logger_name = logger_name
         self.logger = logger or logging.getLogger(logger_name)
 
+
+    def _parse_published(self, value: str) -> datetime | None:
+        """Parse RFC 822 or ISO 8601 to a UTC-aware datetime. None if unparseable."""
+        if not value:
+            return None
+        for parse in (parsedate_to_datetime, datetime.fromisoformat):
+            try:
+                dt = parse(value)
+            except (TypeError, ValueError):
+                continue
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)  # assume UTC when no offset is given
+            return dt.astimezone(timezone.utc)
+        return None
+
+    def latest_items(self, data: dict, n: int = 5) -> dict:
+        """Return a copy of the feed object keeping only the n most recent items."""
+        items = data.get("items") or []
+        dated = [(self._parse_published(i.get("published", "")), i) for i in items]
+        dated.sort(key=lambda p: p[0] or datetime.min.replace(tzinfo=timezone.utc), reverse=True)
+        return {**data, "items": [i for _, i in dated[:n]]}
+
+
     def get_feed_info(self, data):
-        new_dict = {"title": [], "published": [], "link": [], "feed_updated": ""}
-        for key in data.keys():
-            if key == "header":
-                new_dict["feed_updated"] = data[key]["updated"]
-            if key == "items":
-                for item in data[key]:
-                    new_dict["title"].append(item["title"])
-                    new_dict["published"].append(item["published"])
-                    new_dict["link"].append(item["link"])
-                return new_dict
+        items = data.get("items") or []
+        return {
+            "feed_updated": (data.get("header") or {}).get("updated", ""),
+            "title": [i.get("title", "") for i in items],
+            "published": [i.get("published", "") for i in items],
+            "published_fmtd": [self._parse_published(i.get("published", "")) for i in items],
+            "link": [i.get("link", "") for i in items],
+        }   
 
     def flat_json_text(self, new_dict):
         flat_dict = {"id": [], "text": [], "feed_updated": "", "link": []}
@@ -46,7 +67,7 @@ class ProcessData:
                 for value in values:
                     title = f"This item is titled {value}"
                     title_text.append(title)
-            if key == "published":
+            if key == "published_fmtd":
                 for value in values:
                     published = f"published datetime is {value}"
                     published_datetimes.append(published)
@@ -166,7 +187,8 @@ class ProcessData:
             return result
 
         try:
-            new_dict = self.get_feed_info(data)
+            trimmed_data = self.latest_items(data, n=10)  # Keep only the 10 most recent items
+            new_dict = self.get_feed_info(trimmed_data)
             flat_items = self.flat_json_text(new_dict)
             entries = [
                 {"id": i, "text": t, "link": link}
@@ -211,3 +233,13 @@ class ProcessData:
         result["ok"] = True
         result["document_path"] = self.document_path
         return result
+
+if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO)
+    logger = logging.getLogger("process_data")
+    file_path = "var/data/Anasdaq_com/20260918_001730.json"
+    report = ProcessData(file_path=file_path, logger_name=logger.name, logger=logger).run()
+    if not report.get("ok"):
+        logging.error("process_file failed for %s: %s", file_path, report.get("error"))
+    else:
+        logging.info("process_file wrote %s", report)
