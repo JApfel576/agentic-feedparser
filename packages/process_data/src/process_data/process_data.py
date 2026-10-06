@@ -8,10 +8,16 @@ import os
 import logging
 from email.utils import parsedate_to_datetime
 from datetime import datetime, timezone
+from collections import Counter
 
 
 class ProcessData:
-    def __init__(self, file_path, logger_name: str, logger: logging.Logger | None = None):
+    def __init__(
+        self,
+        file_path,
+        logger_name: str | None = None,
+        logger: logging.Logger | None = None,
+    ):
         self.file_path = file_path
         self.path = os.path.dirname(file_path)
         self.filename = os.path.basename(file_path)
@@ -24,7 +30,6 @@ class ProcessData:
         self.logger_name = logger_name
         self.logger = logger or logging.getLogger(logger_name)
 
-
     def _parse_published(self, value: str) -> datetime | None:
         """Parse RFC 822 or ISO 8601 to a UTC-aware datetime. None if unparseable."""
         if not value:
@@ -35,7 +40,9 @@ class ProcessData:
             except (TypeError, ValueError):
                 continue
             if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=timezone.utc)  # assume UTC when no offset is given
+                dt = dt.replace(
+                    tzinfo=timezone.utc
+                )  # assume UTC when no offset is given
             return dt.astimezone(timezone.utc)
         return None
 
@@ -43,9 +50,11 @@ class ProcessData:
         """Return a copy of the feed object keeping only the n most recent items."""
         items = data.get("items") or []
         dated = [(self._parse_published(i.get("published", "")), i) for i in items]
-        dated.sort(key=lambda p: p[0] or datetime.min.replace(tzinfo=timezone.utc), reverse=True)
+        dated.sort(
+            key=lambda p: p[0] or datetime.min.replace(tzinfo=timezone.utc),
+            reverse=True,
+        )
         return {**data, "items": [i for _, i in dated[:n]]}
-
 
     def get_feed_info(self, data):
         items = data.get("items") or []
@@ -53,9 +62,11 @@ class ProcessData:
             "feed_updated": (data.get("header") or {}).get("updated", ""),
             "title": [i.get("title", "") for i in items],
             "published": [i.get("published", "") for i in items],
-            "published_fmtd": [self._parse_published(i.get("published", "")) for i in items],
+            "published_fmtd": [
+                self._parse_published(i.get("published", "")) for i in items
+            ],
             "link": [i.get("link", "") for i in items],
-        }   
+        }
 
     def flat_json_text(self, new_dict):
         flat_dict = {"id": [], "text": [], "feed_updated": "", "link": []}
@@ -82,10 +93,10 @@ class ProcessData:
                     flat_dict["id"].append(i)
                 return flat_dict
 
-    def processed_data(self, entries, path, filename):
+    def processed_data(self, entries):
         self.processed_path.parent.mkdir(parents=True, exist_ok=True)
         with open(self.processed_path, "w", encoding="utf-8") as f:
-            json.dump(entries, f, indent=4)
+            json.dump(entries, f, indent=4, ensure_ascii=False, default=str)
 
     def fetch_and_parse_url(self, actual_url):
         try:
@@ -107,7 +118,7 @@ class ProcessData:
 
             # ...BeautifulSoup parsing logic here ...
             # Get first paragraph text from the fetched page
-            min_words = 40  # Minimum number of words in a sentence
+            min_words = 25  # Minimum number of words in a sentence
             best_word_count = 0
             best_paragraph = None
 
@@ -140,88 +151,96 @@ class ProcessData:
 
     def get_sample_text(self, entry):
         # Fetch the actual URL from the Google News link using gnewsdecoder
-        with requests.Session() as session:
-            session.headers.update(
-                {
-                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.3"
-                }
-            )
-            try:
-                decoded_data = gnewsdecoder(entry["link"])
-                if decoded_data.get("status"):
-                    print("Decoded URL:", decoded_data["decoded_url"])
-                else:
-                    print("Error:", decoded_data["message"])
-            except Exception as e:
-                print(f"Error occurred: {e}")
-            # Check if the decoded_url is a dictionary and contains the "decoded_url" key
-            if isinstance(decoded_data, dict) and decoded_data.get("decoded_url"):
-                actual_url = decoded_data.get("decoded_url")
-                print(f"Processing: {actual_url}")
-                if not actual_url.endswith(".pdf"):
-                    sample_text = self.fetch_and_parse_url(actual_url)
-                else:
-                    sample_text = "This is placeholder sample text for pdf content."  # Placeholder for PDF or non-HTML content
-                return f"This is the sample text for entry {entry['id']}: {sample_text}"
+        try:
+            decoded_data = gnewsdecoder(entry["link"])
+            if decoded_data.get("status"):
+                print("Decoded URL:", decoded_data["decoded_url"])
+            else:
+                print("Error:", decoded_data["message"])
+        except Exception as e:
+            print(f"Error occurred: {e}")
+        # Check if the decoded_url is a dictionary and contains the "decoded_url" key
+        if isinstance(decoded_data, dict) and decoded_data.get("decoded_url"):
+            actual_url = decoded_data.get("decoded_url")
+            print(f"Processing: {actual_url}")
+            if not actual_url.endswith(".pdf"):
+                sample_text = self.fetch_and_parse_url(actual_url)
+            else:
+                sample_text = "This is placeholder sample text for pdf content."  # Placeholder for PDF or non-HTML content
+            return f"This is the sample text for entry {entry['id']}: {sample_text}"
 
     def create_document(self):
         self.document_path.parent.mkdir(parents=True, exist_ok=True)
-        document = []
+
         with open(self.processed_path, "r", encoding="utf-8") as f:
-            processed_file = json.load(f)
-            with open(self.document_path, "w", encoding="utf-8") as f:
-                for entry in processed_file:
-                    text = f"{entry['text']} {entry.get('sample_text', '')}"
-                    document.append(text)
-                f.write("\n\n".join(document))
+            entries = json.load(f)
+
+        print(
+            Counter(
+                "missing"
+                if "sample_text" not in e
+                else "none"
+                if e["sample_text"] is None
+                else "empty"
+                if not str(e["sample_text"]).strip()
+                else "ok"
+                for e in entries
+            )
+        )
+
+        chunks = []
+        for entry in entries:
+            text = (entry.get("text") or "").strip()
+            sample = (entry.get("sample_text") or "").strip()
+            combined = f"{text}\n{sample}".strip()
+            if combined:
+                chunks.append(combined)
+            else:
+                self.logger.warning("Skipping empty entry: %s", entry.get("id"))
+
+        with open(self.document_path, "w", encoding="utf-8") as f:
+            f.write("\n\n".join(chunks) + "\n")
 
     def run(self) -> dict:
         result = {"ok": False, "error": None, "entries": 0, "sample_failures": []}
 
-        try:
-            with open(self.file_path, encoding="utf-8") as f:
-                data = json.load(f)
-        except (OSError, json.JSONDecodeError) as exc:
-            self.logger.exception("could not load %s", self.file_path)
-            result["error"] = f"load failed: {type(exc).__name__}: {exc}"
-            return result
+        with open(self.processed_path, "r", encoding="utf-8") as f:
+            entries = json.load(f)
 
+        # Write 1: persist unenriched entries (safety net)
         try:
-            trimmed_data = self.latest_items(data, n=10)  # Keep only the 10 most recent items
-            new_dict = self.get_feed_info(trimmed_data)
-            flat_items = self.flat_json_text(new_dict)
-            entries = [
-                {"id": i, "text": t, "link": link}
-                for i, t, link in zip(
-                    flat_items["id"], flat_items["text"], flat_items["link"]
-                )
-            ]
-        except (KeyError, TypeError, AttributeError) as exc:
-            self.logger.exception("unexpected feed structure")
-            result["error"] = f"transform failed: {type(exc).__name__}: {exc}"
-            return result
-
-        result["entries"] = len(entries)
-        if not entries:
-            result["error"] = "no entries found"
-            return result
-
-        try:
-            self.processed_data(entries, self.processed_path, self.filename)
+            self.processed_data(entries)
         except OSError as exc:
             self.logger.exception("failed writing processed data")
             result["error"] = f"write failed: {type(exc).__name__}: {exc}"
             return result
-        # limit to 10 entries
-        for entry in entries[:10]:
+
+        # Enrich
+        for entry in entries:
             try:
-                entry["sample_text"] = self.get_sample_text(entry)
+                sample = self.get_sample_text(entry)
             except Exception as exc:
-                self.logger.exception("get_sample_text failed for id=%s", entry.get("id"))
-                entry["sample_text"] = None
+                self.logger.exception(
+                    "get_sample_text failed for id=%s", entry.get("id")
+                )
+                sample = None
                 result["sample_failures"].append(
                     {"id": entry.get("id"), "error": f"{type(exc).__name__}: {exc}"}
                 )
+            else:
+                if not sample:
+                    result["sample_failures"].append(
+                        {"id": entry.get("id"), "error": "no sample text"}
+                    )
+            entry["sample_text"] = sample
+
+        # Write 2: persist enriched entries, must come after the loop
+        try:
+            self.processed_data(entries)
+        except OSError as exc:
+            self.logger.exception("failed writing enriched data")
+            result["error"] = f"enriched write failed: {type(exc).__name__}: {exc}"
+            return result
 
         try:
             self.create_document()
@@ -231,15 +250,21 @@ class ProcessData:
             return result
 
         result["ok"] = True
-        result["document_path"] = self.document_path
+        result["document_path"] = str(self.document_path)
         return result
+
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
     logger = logging.getLogger("process_data")
     file_path = "var/data/Anasdaq_com/20260918_001730.json"
-    report = ProcessData(file_path=file_path, logger_name=logger.name, logger=logger).run()
-    if not report.get("ok"):
-        logging.error("process_file failed for %s: %s", file_path, report.get("error"))
-    else:
-        logging.info("process_file wrote %s", report)
+    report = ProcessData(file_path=file_path, logger=logger).run()
+
+    if not report or not report.get("ok"):
+        logger.error(
+            "process_file failed for %s: %s",
+            file_path,
+            (report or {}).get("error", "no report returned"),
+        )
+
+    logger.info("process_file wrote %s", report)
