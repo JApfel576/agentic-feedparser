@@ -78,7 +78,7 @@ class ProcessData:
                 for value in values:
                     title = f"This item is titled {value}"
                     title_text.append(title)
-            if key == "published_fmtd":
+            if key == "published":
                 for value in values:
                     published = f"published datetime is {value}"
                     published_datetimes.append(published)
