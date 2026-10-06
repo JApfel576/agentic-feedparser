@@ -204,8 +204,33 @@ class ProcessData:
     def run(self) -> dict:
         result = {"ok": False, "error": None, "entries": 0, "sample_failures": []}
 
-        with open(self.processed_path, "r", encoding="utf-8") as f:
-            entries = json.load(f)
+        try:
+            with open(self.file_path, encoding="utf-8") as f:
+                data = json.load(f)
+        except (OSError, json.JSONDecodeError) as exc:
+            self.logger.exception("could not load %s", self.file_path)
+            result["error"] = f"load failed: {type(exc).__name__}: {exc}"
+            return result
+
+        try:
+            trimmed_data = self.latest_items(data, n=10)
+            new_dict = self.get_feed_info(trimmed_data)
+            flat_items = self.flat_json_text(new_dict)
+            entries = [
+                {"id": i, "text": t, "link": link}
+                for i, t, link in zip(
+                    flat_items["id"], flat_items["text"], flat_items["link"]
+                )
+            ]
+        except (KeyError, TypeError, AttributeError) as exc:
+            self.logger.exception("unexpected feed structure")
+            result["error"] = f"transform failed: {type(exc).__name__}: {exc}"
+            return result
+
+        result["entries"] = len(entries)
+        if not entries:
+            result["error"] = "no entries found"
+            return result
 
         # Write 1: persist unenriched entries (safety net)
         try:
