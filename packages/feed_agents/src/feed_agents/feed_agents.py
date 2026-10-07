@@ -294,8 +294,18 @@ def process_data(path: str) -> str:
     """
     setup_logging(PROJECT_ROOT)
     logger = logging.getLogger(__name__)
-    print("pid:", os.getpid(), "| name:", __name__, "| disabled:", logger.disabled,
-        "| propagate:", logger.propagate, "| effective level:", logger.getEffectiveLevel())
+    print(
+        "pid:",
+        os.getpid(),
+        "| name:",
+        __name__,
+        "| disabled:",
+        logger.disabled,
+        "| propagate:",
+        logger.propagate,
+        "| effective level:",
+        logger.getEffectiveLevel(),
+    )
     print("root handlers:", logging.getLogger().handlers)
     logger.warning("probe from agent")
 
@@ -317,7 +327,7 @@ def process_data(path: str) -> str:
         logging.error("process_file failed for %s: %s", real, report.get("error"))
     else:
         logging.info("process_file wrote %s", report)
-        return report.get("report")
+    return report
 
 
 def request_team(
@@ -587,22 +597,36 @@ def process_team(
         if not sites:
             content = "Processing skipped: no sites in search results."
         else:
-            site = sites[0]
-            try:
-                # Step 1: locate the file
-                file_path = find_data(site)  # match find_data's arg name
-                if (
-                    not file_path
-                    or not isinstance(file_path, str)
-                    or file_path.startswith("ERROR")
-                ):
-                    raise FileNotFoundError(
-                        f"find_data found no file for {site!r}: {file_path!r}"
+            for site in sites:
+                try:
+                    # Step 1: locate the file
+                    file_path = find_data(site)  # match find_data's arg name
+                    if (
+                        not file_path
+                        or not isinstance(file_path, str)
+                        or file_path.startswith("ERROR")
+                    ):
+                        raise FileNotFoundError(
+                            f"find_data found no file for {site!r}: {file_path!r}"
+                        )
+                except Exception as exc:  # covers ValueError (missing site: filter) and FileNotFoundError
+                    logging.exception(
+                        "processing_agent: cannot locate data for %r", site
                     )
-
+                    content = f"Processing failed: {type(exc).__name__}: {exc}"
+                    return Command(
+                        update={
+                            "messages": [AIMessage(content=content, name="processor")],
+                            "dispatched_agents_run": state.get(
+                                "dispatched_agents_run", []
+                            )
+                            + ["processor"],
+                        },
+                        goto="supervisor",
+                    )
                 # Step 2: process it
                 report = process_data(file_path)  # match process_data's arg name
-
+                logging.info("report type=%s value=%r", type(report), report)
                 if report.get("ok"):
                     content = (
                         f"Processing completed successfully. file={file_path}, "
@@ -614,10 +638,6 @@ def process_team(
                     content = (
                         f"Processing failed for {file_path}: {report.get('error')}"
                     )
-            except Exception as exc:
-                logging.exception("processing agent failed")
-                content = f"Processing failed: {type(exc).__name__}: {exc}"
-
         return Command(
             update={
                 "messages": [AIMessage(content=content, name="processor")],
