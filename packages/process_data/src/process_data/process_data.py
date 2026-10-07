@@ -9,6 +9,7 @@ import logging
 from email.utils import parsedate_to_datetime
 from datetime import datetime, timezone
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 
 class ProcessData:
@@ -175,19 +176,6 @@ class ProcessData:
         with open(self.processed_path, "r", encoding="utf-8") as f:
             entries = json.load(f)
 
-        print(
-            Counter(
-                "missing"
-                if "sample_text" not in e
-                else "none"
-                if e["sample_text"] is None
-                else "empty"
-                if not str(e["sample_text"]).strip()
-                else "ok"
-                for e in entries
-            )
-        )
-
         chunks = []
         for entry in entries:
             text = (entry.get("text") or "").strip()
@@ -239,24 +227,28 @@ class ProcessData:
             self.logger.exception("failed writing processed data")
             result["error"] = f"write failed: {type(exc).__name__}: {exc}"
             return result
-
-        # Enrich
-        for entry in entries:
+        # Use ThreadPoolExecutor to fetch sample text concurrently
+        with ThreadPoolExecutor(max_workers=8) as ex:
+            futures = {ex.submit(self.get_sample_text, e): e for e in entries}
+        for fut in as_completed(futures):
+            futures[fut]["sample_text"] = fut.result()
+            entry = futures[fut]
+            entry_id = entry.get("id")
             try:
-                sample = self.get_sample_text(entry)
+                sample = fut.result()
             except Exception as exc:
                 self.logger.exception(
-                    "get_sample_text failed for id=%s", entry.get("id")
-                )
+                        "get_sample_text failed for id=%s", entry_id
+                    )
                 sample = None
                 result["sample_failures"].append(
-                    {"id": entry.get("id"), "error": f"{type(exc).__name__}: {exc}"}
-                )
+                        {"id": entry_id, "error": f"{type(exc).__name__}: {exc}"}
+                    )
             else:
                 if not sample:
                     result["sample_failures"].append(
-                        {"id": entry.get("id"), "error": "no sample text"}
-                    )
+                            {"id": entry_id, "error": "no sample text"}
+                        )
             entry["sample_text"] = sample
 
         # Write 2: persist enriched entries, must come after the loop
@@ -277,19 +269,3 @@ class ProcessData:
         result["ok"] = True
         result["document_path"] = str(self.document_path)
         return result
-
-
-if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO)
-    logger = logging.getLogger("process_data")
-    file_path = "var/data/Anasdaq_com/20260918_001730.json"
-    report = ProcessData(file_path=file_path, logger=logger).run()
-
-    if not report or not report.get("ok"):
-        logger.error(
-            "process_file failed for %s: %s",
-            file_path,
-            (report or {}).get("error", "no report returned"),
-        )
-
-    logger.info("process_file wrote %s", report)
