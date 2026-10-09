@@ -20,7 +20,7 @@ import json
 from base_agents import DefaultAgent, make_supervisor_node, MessagesState
 from typing import Annotated, Callable, Literal, TypedDict
 import operator
-from process_data import ProcessData
+from process_data import ProcessData, Ingest
 import logging
 
 # Resolve the project root
@@ -32,6 +32,7 @@ PROJECT_ROOT = Path(os.environ.get("PROJECT_ROOT", ROOT))
 DATA_DIR = os.path.join(PROJECT_ROOT, "var", "data")
 TS_FILE = re.compile(r"^\d{8}_\d{6}\.json$")
 
+DB_DIR = os.path.join(PROJECT_ROOT, "var", "data", "chroma_db_storage")
 
 _SITE_Q = re.compile(
     r"(?:^|\s)site:(?P<domain>[a-z0-9-]+(?:\.[a-z0-9-]+)+)(?P<path>/\S*)?(?=\s|$)",
@@ -122,6 +123,7 @@ class SupervisorState(MessagesState):
     # Set by site_requester when it cannot do its work yet, so mark_subtask_complete leaves
     # the subtask pending instead of stamping a no-op dispatch as done.
     subtask_blocked: bool
+    processed_paths: list[str]  # paths of files successfully processed by process_team
 
 
 search = GoogleSerperAPIWrapper()
@@ -329,6 +331,55 @@ def process_data(path: str) -> str:
         logging.info("process_file wrote %s", report)
     return report
 
+def ingest_data(source_path: str, target_path: str) -> str:
+    """Ingest a data file found by find_response_file and write the output to disk.
+
+    Args:
+        source_path: Absolute path to a .json file under the data directory.
+        target_path: Absolute path to the Chroma DB storage directory.
+
+    Returns:
+        The output file path on success, or an 'ERROR: ...' message.
+    """
+    setup_logging(PROJECT_ROOT)
+    logger = logging.getLogger(__name__)
+    print(
+        "pid:",
+        os.getpid(),
+        "| name:",
+        __name__,
+        "| disabled:",
+        logger.disabled,
+        "| propagate:",
+        logger.propagate,
+        "| effective level:",
+        logger.getEffectiveLevel(),
+    )
+    print("root handlers:", logging.getLogger().handlers)
+    logger.warning("probe from agent")
+
+    if not source_path or not target_path:
+        return "ERROR: source_path or target_path is not populated"
+
+    real_source = os.path.realpath(source_path)
+    real_target = os.path.realpath(target_path)
+    root = os.path.realpath(DB_DIR)
+
+    try:
+        if os.path.commonpath([real_source, root]) != root:
+            return f"ERROR: source_path is outside the data directory: {source_path}"
+    except ValueError:  # different drives on Windows
+        return f"ERROR: source_path is outside the data directory: {source_path}"
+
+    if not os.path.isfile(real_source):
+        return f"ERROR: file not found: {source_path}"
+
+    report = Ingest(source_path=real_source, target_path=real_target, logger_name=logger.name, logger=logger).run()
+    if not report.get("ok"):
+        logging.error("ingest_data failed for %s: %s", real_source, report.get("error"))
+    else:
+        logging.info("ingest_data wrote %s", report)
+    return report
 
 def request_team(
     state: SupervisorState, model: str, config: RunnableConfig | None
@@ -634,6 +685,7 @@ def process_team(
                         f"sample_failures={len(report['sample_failures'])}, "
                         f"output={report.get('document_path')}"
                     )
+                    processed_paths = state.get("processed_paths", []) + [report.get("document_path")]
                 else:
                     content = (
                         f"Processing failed for {file_path}: {report.get('error')}"
@@ -641,18 +693,68 @@ def process_team(
         return Command(
             update={
                 "messages": [AIMessage(content=content, name="processor")],
+                "processed_paths": processed_paths,
                 "dispatched_agents_run": state.get("dispatched_agents_run", [])
                 + ["processor"],
             },
             goto="supervisor",
         )
 
-    agent_roles = ["processor"]  # used to direct supervisor to agent(s)
+    def storing_agent(state: SupervisorState) -> Command[Literal["supervisor"]]:
+        logging.info("storing agent entered")
+        try:
+            # Step 1: locate the file
+            source_path = state.get("processed_paths", [None])[0]  # get the first processed path
+            target_path = DB_DIR  # or any other target path you want to use
+            if (
+                not source_path
+                or not isinstance(source_path, str)
+                or source_path.startswith("ERROR")
+            ):
+                raise ValueError(
+                    f"Issue with source_path text for{source_path!r}"
+                )
+        except Exception as exc:
+            logging.exception(
+                "storing_agent: cannot store data for %r", source_path
+            )
+            content = f"Storing failed: {type(exc).__name__}: {exc}"
+            return Command(
+                update={
+                    "messages": [AIMessage(content=content, name="storing_agent")],
+                    "dispatched_agents_run": state.get(
+                        "dispatched_agents_run", []
+                    )
+                    + ["storing_agent"],
+                },
+                goto="supervisor",
+            )
+        # Step 2: process it
+        report = ingest_data(source_path, target_path)
+        logging.info("report type=%s value=%r", type(report), report)
+        if report.get("ok"):
+            content = (
+                f"Storing completed successfully. {report.get('ok')}"
+            )
+        else:
+            content = (
+                f"Storing failed for {source_path}: {report.get('error')}"
+            )
+        return Command(
+            update={
+                "messages": [AIMessage(content=content, name="storing_agent")],
+                "dispatched_agents_run": state.get("dispatched_agents_run", [])
+                + ["storing_agent"],
+            },
+        goto="supervisor",
+        )
+
+    agent_roles = ["processor", "storing_agent"]  # used to direct supervisor to agent(s)
     supervisor_node = make_supervisor_node(
         model,
         agent_roles,
         config=config,
-        additional_instructions="After request team completes. Process the data returned and stored.",
+        additional_instructions="After request team completes. Process the data returned. Store the processed data in the database.",
         team_name="process_team",
     )
 
@@ -660,6 +762,7 @@ def process_team(
     builder.add_node(
         "processor", processing_agent
     )  # agent subgraph node, returns updates to supervisor
+    builder.add_node("storing_agent", storing_agent)
     builder.add_node("supervisor", supervisor_node)
     builder.set_entry_point("supervisor")
     return builder.compile()
