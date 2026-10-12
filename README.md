@@ -90,6 +90,7 @@ This approach avoids scraping entire sites unless the metadata indicates the art
 │       └── src
 │           ├── process_data
 │           │   ├── __init__.py
+│           │   ├── ingest.py
 │           │   └── process_data.py
 │           └── process_data.egg-info
 │               ├── PKG-INFO
@@ -123,6 +124,6 @@ This approach avoids scraping entire sites unless the metadata indicates the art
             ├── 20260515_183846.json
             └── state.json
 
-30 directories, 52 files
+30 directories, 53 files
 ```
 <!-- TREE_END -->
