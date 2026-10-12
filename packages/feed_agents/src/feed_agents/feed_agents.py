@@ -267,8 +267,6 @@ def _slug(site: str) -> str:
     if not m:
         raise ValueError("query missing a site: filter")
     return m["domain"].lower().removeprefix("www.").replace(".", "_")
-    print(q)
-    return q
 
 
 def find_data(site: str) -> str:
@@ -285,7 +283,7 @@ def find_data(site: str) -> str:
     return os.path.join(site_dir, max(files))  # YYYYMMDD_HHMMSS sorts lexically
 
 
-def process_data(path: str) -> str:
+def process_data(path: str) -> dict:
     """Process a data file found by find_response_file and write the output to disk.
 
     Args:
@@ -331,7 +329,8 @@ def process_data(path: str) -> str:
         logging.info("process_file wrote %s", report)
     return report
 
-def ingest_data(source_path: str, target_path: str) -> str:
+
+def ingest_data(source_path: str, target_path: str) -> dict:
     """Ingest a data file found by find_response_file and write the output to disk.
 
     Args:
@@ -363,7 +362,7 @@ def ingest_data(source_path: str, target_path: str) -> str:
 
     real_source = os.path.realpath(source_path)
     real_target = os.path.realpath(target_path)
-    root = os.path.realpath(DB_DIR)
+    root = os.path.realpath(DATA_DIR)
 
     try:
         if os.path.commonpath([real_source, root]) != root:
@@ -374,12 +373,18 @@ def ingest_data(source_path: str, target_path: str) -> str:
     if not os.path.isfile(real_source):
         return f"ERROR: file not found: {source_path}"
 
-    report = Ingest(source_path=real_source, target_path=real_target, logger_name=logger.name, logger=logger).run()
+    report = Ingest(
+        source_path=real_source,
+        target_path=real_target,
+        logger_name=logger.name,
+        logger=logger,
+    ).run()
     if not report.get("ok"):
         logging.error("ingest_data failed for %s: %s", real_source, report.get("error"))
     else:
         logging.info("ingest_data wrote %s", report)
     return report
+
 
 def request_team(
     state: SupervisorState, model: str, config: RunnableConfig | None
@@ -676,6 +681,12 @@ def process_team(
                         goto="supervisor",
                     )
                 # Step 2: process it
+                logging.info(
+                    "callee=%s:%s file=%s",
+                    process_data.__code__.co_filename,
+                    process_data.__code__.co_firstlineno,
+                    __file__,
+                )
                 report = process_data(file_path)  # match process_data's arg name
                 logging.info("report type=%s value=%r", type(report), report)
                 if report.get("ok"):
@@ -685,7 +696,9 @@ def process_team(
                         f"sample_failures={len(report['sample_failures'])}, "
                         f"output={report.get('document_path')}"
                     )
-                    processed_paths = state.get("processed_paths", []) + [report.get("document_path")]
+                    processed_paths = state.get("processed_paths", []) + [
+                        report.get("document_path")
+                    ]
                 else:
                     content = (
                         f"Processing failed for {file_path}: {report.get('error')}"
@@ -704,27 +717,22 @@ def process_team(
         logging.info("storing agent entered")
         try:
             # Step 1: locate the file
-            source_path = state.get("processed_paths", [None])[0]  # get the first processed path
+            source_paths = state.get("processed_paths", [None])
             target_path = DB_DIR  # or any other target path you want to use
-            if (
-                not source_path
-                or not isinstance(source_path, str)
-                or source_path.startswith("ERROR")
-            ):
-                raise ValueError(
-                    f"Issue with source_path text for{source_path!r}"
-                )
+            for source_path in source_paths:
+                if (
+                    not source_path
+                    or not isinstance(source_path, str)
+                    or source_path.startswith("ERROR")
+                ):
+                    raise ValueError(f"Issue with source_path text for{source_path!r}")
         except Exception as exc:
-            logging.exception(
-                "storing_agent: cannot store data for %r", source_path
-            )
+            logging.exception("storing_agent: cannot store data for %r", source_path)
             content = f"Storing failed: {type(exc).__name__}: {exc}"
             return Command(
                 update={
                     "messages": [AIMessage(content=content, name="storing_agent")],
-                    "dispatched_agents_run": state.get(
-                        "dispatched_agents_run", []
-                    )
+                    "dispatched_agents_run": state.get("dispatched_agents_run", [])
                     + ["storing_agent"],
                 },
                 goto="supervisor",
@@ -733,23 +741,22 @@ def process_team(
         report = ingest_data(source_path, target_path)
         logging.info("report type=%s value=%r", type(report), report)
         if report.get("ok"):
-            content = (
-                f"Storing completed successfully. {report.get('ok')}"
-            )
+            content = f"Storing completed successfully. {report.get('ok')}"
         else:
-            content = (
-                f"Storing failed for {source_path}: {report.get('error')}"
-            )
+            content = f"Storing failed for {source_path}: {report.get('error')}"
         return Command(
             update={
                 "messages": [AIMessage(content=content, name="storing_agent")],
                 "dispatched_agents_run": state.get("dispatched_agents_run", [])
                 + ["storing_agent"],
             },
-        goto="supervisor",
+            goto="supervisor",
         )
 
-    agent_roles = ["processor", "storing_agent"]  # used to direct supervisor to agent(s)
+    agent_roles = [
+        "processor",
+        "storing_agent",
+    ]  # used to direct supervisor to agent(s)
     supervisor_node = make_supervisor_node(
         model,
         agent_roles,
