@@ -19,16 +19,15 @@ import logging
 # DB_DIR = os.path.join(PROJECT_ROOT, "var", "data", "chroma_db_storage")
 
 class Ingest:
-    def __init__(self, source_path: str, target_path: str, logger_name: str | None = None, logger: logging.Logger | None = None):
-        self.filename = os.path.basename(source_path)
-        self.source_path = source_path
-        self.target_path = target_path
+    def __init__(self, source_path: str | Path, target_path: str | Path, logger_name: str | None = None, logger: logging.Logger | None = None):
+        self.source_path = Path(source_path)
+        self.target_path = Path(target_path)
+        self.filename = self.source_path.name
 
         self.logger_name = logger_name
         self.logger = logger or logging.getLogger(logger_name)
 
-        self.source_path.parent.mkdir(parents=True, exist_ok=True)
-        self.target_path.parent.mkdir(parents=True, exist_ok=True)
+        self.target_path.mkdir(parents=True, exist_ok=True)
 
     def read_file(self):
         try:
@@ -58,7 +57,7 @@ class Ingest:
         embedding_model = OpenAIEmbeddings(model="text-embedding-3-small")
 
         vector_db = Chroma.from_documents(
-            chunks, embedding_model, persist_directory=Path(self.target_path)
+            chunks, embedding_model, persist_directory=Path(str(self.target_path))
         )
 
         return f"Successfully vectorized and stored {len(chunks)} chunks."
