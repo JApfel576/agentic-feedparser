@@ -81,58 +81,32 @@ _SITE_Q = re.compile(
     re.IGNORECASE,
 )
 
+def _slug(site: str) -> str:
+    """'https://news.google.com/search?q=site:reuters.com%20stock%20market' -> 'reuters_com'"""
+
+    parsed = urlparse(site)
+    q = parse_qs(parsed.query).get("q", [""])[0]
+    m = _SITE_Q.search(q)
+    if not m:
+        raise ValueError("query missing a site: filter")
+    return m["domain"].lower().removeprefix("www.").replace(".", "_")
+
 
 def convert_to_rss(url_input: str) -> str:
     """Convert a Google News site-search URL to its RSS equivalent."""
-    parsed = urlparse(url_input)
+    parsed = urlparse(url_input.strip())
 
     if parsed.hostname != "news.google.com":
         raise ValueError(f"expected news.google.com, got {parsed.hostname!r}")
+
+    _slug(url_input)  # validates the site: filter; raises ValueError if missing
 
     if parsed.path.startswith("/rss/"):  # already converted
         return url_input
     if parsed.path != "/search":
         raise ValueError(f"unexpected path {parsed.path!r}")
 
-    q = parse_qs(parsed.query).get("q", [""])[0]
-    if not _SITE_Q.search(q):
-        raise ValueError("query missing a site: filter")
-
     return urlunparse(parsed._replace(path="/rss" + parsed.path))
-
-
-from urllib.parse import urlparse, parse_qs
-import re
-
-
-def extract_site(url_input: str) -> str:
-    """Extract the domain name (without the TLD) from a 'site:' filter
-    inside a URL's query string, e.g.
-    'https://news.google.com/search?q=site%3Amarketwatch.com%20latest...'
-    -> 'marketwatch'
-    """
-    parsed = urlparse(url_input)
-    query_params = parse_qs(parsed.query)
-
-    q_value = query_params.get("q", [""])[0]
-
-    # find the site:<domain> token within the query text
-    match = re.search(r"site:([\w.-]+)", q_value)
-    if not match:
-        raise ValueError(f"No 'site:' filter found in query: {q_value!r}")
-
-    domain = match.group(1)
-
-    # strip a leading www. and the final TLD segment
-    if domain.startswith("www."):
-        domain = domain[4:]
-    # domain
-    domain_tld = domain.rsplit(".", 1)[0]
-    domain_suffix = domain.rsplit(".", 1)[1]
-    site = f"{domain_tld}_{domain_suffix}"
-
-    return site
-
 
 def recent_feed_data(path: str) -> str:
     """Get most recent file name for feed data"""
@@ -171,11 +145,10 @@ def rss_endpoint(url_input: RssUrl):
 
 from fastapi import HTTPException
 
-
 @app.get("/data", response_model=Model)
 def feed_data(url_input: RssUrl) -> Any:
     """Get data using created feed url and store in site specific folder"""
-    site_folder = extract_site(url_input)
+    site_folder = _slug(url_input)
     out_dir = os.path.join(project_root, "var", "data", site_folder)
 
     rss_poller = FeedPoller(url=url_input, out_dir=out_dir)
