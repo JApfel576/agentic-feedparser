@@ -29,7 +29,7 @@ load_dotenv(ROOT / ".env")
 
 PROJECT_ROOT = Path(os.environ.get("PROJECT_ROOT", ROOT))
 
-DATA_DIR = os.path.join(PROJECT_ROOT, "var", "data")
+DATA_DIR = os.path.join(ROOT, "var", "data")
 TS_FILE = re.compile(r"^\d{8}_\d{6}\.json$")
 
 DB_DIR = os.path.join(PROJECT_ROOT, "var", "data", "chroma_db_storage")
@@ -126,11 +126,11 @@ class SupervisorState(MessagesState):
     processed_paths: list[str]  # paths of files successfully processed by process_team
 
 
-search = GoogleSerperAPIWrapper()
+search = GoogleSerperAPIWrapper(k=5)
 api_host = "http://127.0.0.1:8000"
 MAX_APPROVAL_ATTEMPTS = 3  # how many times human_approval may bounce back to agent before giving up and proceeding to supervisor
-DATA_DIR = os.path.join(ROOT, "var", "data")
-TS_FILE = re.compile(r"^\d{8}_\d{6}\.json$")
+
+SITES_OUT =["https://www.bloomberg.com/", "https://www.marketwatch.com/", "https://finance.yahoo.com/", "https://www.cnbc.com/", "https://finzer.io/en/blog/best-financial-news-sources", "https://www.briefing.com/", "https://www.reddit.com/r/Bogleheads/comments/1ecalk2/what_are_some_good_news_sources_you_use_for/", "https://www.facebook.com/forbes/posts/text-mining-of-news-releases-shows-which-terms-tend-to-move-stock-prices-both-up/10159217149842509/", "https://www.cnn.com/markets", "https://www.linkedin.com/pulse/top-financial-stock-market-news-sources-barry-d-moore-qotaf"]
 
 
 def setup_logging(project_root: str) -> None:
@@ -172,10 +172,10 @@ def normalize_site_operator(raw_site: str) -> str:
 @tool
 def relevant_site(topic: str) -> dict:
     """Provide a relevant link for input topic using google serper"""
-    results = search.results(k=5, query=topic)
-    results = results["organic"]
-    sites_out = [item.get("link") for item in results]
-    output = SiteResponseOutput(topic=topic, sites=sites_out)
+    # results = search.results(topic)
+    # results = results["organic"]
+    # sites_out = [item.get("link") for item in results]
+    output = SiteResponseOutput(topic=topic, sites=SITES_OUT)
     return output.model_dump()
 
 
@@ -650,13 +650,27 @@ def process_team(
         logging.info("processing agent entered")
 
         sites = (state.get("search_results") or {}).get("sites") or []
+        processed_paths = list(state.get("processed_paths") or [])  # init once
+        results: list[str] = []
+
+        def _fail(content: str) -> Command:
+            return Command(
+                update={
+                    "messages": [AIMessage(content=content, name="processor")],
+                    "processed_paths": processed_paths,  # keep what succeeded so far
+                    "dispatched_agents_run": state.get("dispatched_agents_run", [])
+                    + ["processor"],
+                },
+                goto="supervisor",
+            )
+
         if not sites:
-            content = "Processing skipped: no sites in search results."
+            results.append("Processing skipped: no sites in search results.")
         else:
             for site in sites:
+                # Step 1: locate the file
                 try:
-                    # Step 1: locate the file
-                    file_path = find_data(site)  # match find_data's arg name
+                    file_path = find_data(site)
                     if (
                         not file_path
                         or not isinstance(file_path, str)
@@ -665,50 +679,37 @@ def process_team(
                         raise FileNotFoundError(
                             f"find_data found no file for {site!r}: {file_path!r}"
                         )
-                except Exception as exc:  # covers ValueError (missing site: filter) and FileNotFoundError
-                    logging.exception(
-                        "processing_agent: cannot locate data for %r", site
-                    )
-                    content = f"Processing failed: {type(exc).__name__}: {exc}"
-                    return Command(
-                        update={
-                            "messages": [AIMessage(content=content, name="processor")],
-                            "dispatched_agents_run": state.get(
-                                "dispatched_agents_run", []
-                            )
-                            + ["processor"],
-                        },
-                        goto="supervisor",
-                    )
+                except Exception as exc:
+                    logging.exception("processing_agent: cannot locate data for %r", site)
+                    results.append(f"{site}: locate failed ({type(exc).__name__}: {exc})")
+                    continue  # don't abort the whole batch
+
                 # Step 2: process it
-                logging.info(
-                    "callee=%s:%s file=%s",
-                    process_data.__code__.co_filename,
-                    process_data.__code__.co_firstlineno,
-                    __file__,
-                )
-                report = process_data(file_path)  # match process_data's arg name
-                logging.info("report type=%s value=%r", type(report), report)
+                try:
+                    report = process_data(file_path)
+                except Exception as exc:
+                    logging.exception("processing_agent: process_data crashed for %s", file_path)
+                    results.append(f"{file_path}: processing crashed ({type(exc).__name__}: {exc})")
+                    continue
+
                 if report.get("ok"):
-                    content = (
-                        f"Processing completed successfully. file={file_path}, "
-                        f"entries={report['entries']}, "
-                        f"sample_failures={len(report['sample_failures'])}, "
-                        f"output={report.get('document_path')}"
+                    doc_path = report.get("document_path")
+                    if doc_path and doc_path not in processed_paths:  # dedupe
+                        processed_paths.append(doc_path)
+                    results.append(
+                        f"{file_path}: ok, entries={report['entries']}, "
+                        f"sample_failures={len(report['sample_failures'])}, output={doc_path}"
                     )
-                    processed_paths = state.get("processed_paths", []) + [
-                        report.get("document_path")
-                    ]
                 else:
-                    content = (
-                        f"Processing failed for {file_path}: {report.get('error')}"
-                    )
+                    results.append(f"{file_path}: failed ({report.get('error')})")
+
+        content = "Processing summary:\n" + "\n".join(results)
+
         return Command(
             update={
                 "messages": [AIMessage(content=content, name="processor")],
                 "processed_paths": processed_paths,
-                "dispatched_agents_run": state.get("dispatched_agents_run", [])
-                + ["processor"],
+                "dispatched_agents_run": state.get("dispatched_agents_run", []) + ["processor"],
             },
             goto="supervisor",
         )
@@ -738,12 +739,13 @@ def process_team(
                 goto="supervisor",
             )
         # Step 2: process it
-        report = ingest_data(source_path, target_path)
-        logging.info("report type=%s value=%r", type(report), report)
-        if report.get("ok"):
-            content = f"Storing completed successfully. {report.get('ok')}"
-        else:
-            content = f"Storing failed for {source_path}: {report.get('error')}"
+        for source_path in source_paths:
+            report = ingest_data(source_path, target_path)
+            logging.info("report type=%s value=%r", type(report), report)
+            if report.get("ok"):
+                content = f"Storing completed successfully. {report.get('ok')}"
+            else:
+                content = f"Storing failed for {source_path}: {report.get('error')}"
         return Command(
             update={
                 "messages": [AIMessage(content=content, name="storing_agent")],

@@ -10,7 +10,7 @@ from email.utils import parsedate_to_datetime
 from datetime import datetime, timezone
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
-
+import hashlib
 
 class ProcessData:
     def __init__(
@@ -57,10 +57,16 @@ class ProcessData:
         )
         return {**data, "items": [i for _, i in dated[:n]]}
 
+    def _make_id(self, item: dict) -> str:
+        """Stable ID derived from the item's identifying fields."""
+        key = item.get("link") or f'{item.get("title", "")}|{item.get("published", "")}'
+        return hashlib.sha256(key.encode("utf-8")).hexdigest()[:16]
+
     def get_feed_info(self, data):
         items = data.get("items") or []
         return {
             "feed_updated": (data.get("header") or {}).get("updated", ""),
+            "id": [self._make_id(i) for i in items],
             "title": [i.get("title", "") for i in items],
             "published": [i.get("published", "") for i in items],
             "published_fmtd": [
@@ -69,37 +75,13 @@ class ProcessData:
             "link": [i.get("link", "") for i in items],
         }
 
-    def flat_json_text(self, new_dict):
-        flat_dict = {"id": [], "text": [], "feed_updated": "", "link": []}
-        title_text = []
-        published_datetimes = []
-        # retrieved the title and published datetime from the new_dict and created a flat text for each item
-        for key, values in new_dict.items():
-            if key == "title":
-                for value in values:
-                    title = f"This item is titled {value}"
-                    title_text.append(title)
-            if key == "published":
-                for value in values:
-                    published = f"published datetime is {value}"
-                    published_datetimes.append(published)
-                # create a list of tuples containing the title and published datetime for each item
-                joined_info = list(zip(title_text, published_datetimes))
-                flat_text = [f"{i[0]}, and {i[1]}" for i in joined_info]
-                flat_dict["text"] = flat_text
-                flat_dict["feed_updated"] = new_dict["feed_updated"]
-                flat_dict["link"] = new_dict["link"]
-                # create a list of ids for each item in the flat_text list
-                for i in range(len(flat_text)):
-                    flat_dict["id"].append(i)
-                return flat_dict
 
-    def processed_data(self, entries):
+    def processed_data(self, entries: list[dict]):
         self.processed_path.parent.mkdir(parents=True, exist_ok=True)
         with open(self.processed_path, "w", encoding="utf-8") as f:
             json.dump(entries, f, indent=4, ensure_ascii=False, default=str)
 
-    def fetch_and_parse_url(self, actual_url):
+    def fetch_and_parse_url(self, actual_url: str) -> str | None:
         try:
             # Add the impersonate parameter to match a real browser fingerprint
             response = requests.get(actual_url, impersonate="chrome120", timeout=15)
@@ -150,25 +132,31 @@ class ProcessData:
             # Catch-all for network issues (like DNS failure or dropped sockets)
             print(f"Skipping: Network error occurred -> {e}")
 
-    def get_sample_text(self, entry):
+    def get_sample_text(self, entries: dict) -> str | None:
+        link = entries.get("link")
+        if not link: 
+            return None  # Skip if link is missing or is a Google News link
+
+        if link.startswith("https://news.google.com/"):
         # Fetch the actual URL from the Google News link using gnewsdecoder
-        try:
-            decoded_data = gnewsdecoder(entry["link"])
-            if decoded_data.get("status"):
-                print("Decoded URL:", decoded_data["decoded_url"])
-            else:
-                print("Error:", decoded_data["message"])
-        except Exception as e:
-            print(f"Error occurred: {e}")
-        # Check if the decoded_url is a dictionary and contains the "decoded_url" key
-        if isinstance(decoded_data, dict) and decoded_data.get("decoded_url"):
-            actual_url = decoded_data.get("decoded_url")
-            print(f"Processing: {actual_url}")
-            if not actual_url.endswith(".pdf"):
-                sample_text = self.fetch_and_parse_url(actual_url)
-            else:
-                sample_text = "This is placeholder sample text for pdf content."  # Placeholder for PDF or non-HTML content
-            return f"This is the sample text for entry {entry['id']}: {sample_text}"
+            try:
+                decoded_data = gnewsdecoder(link)
+                if decoded_data.get("status"):
+                    print("Decoded URL:", decoded_data["decoded_url"])
+                else:
+                    logging.info("Error:", decoded_data["message"])
+                    return None
+            except Exception as e:
+                print(f"Error occurred: {e}")
+            # Check if the decoded_url is a dictionary and contains the "decoded_url" key
+            if isinstance(decoded_data, dict) and decoded_data.get("decoded_url"):
+                actual_url = decoded_data.get("decoded_url")
+                print(f"Processing: {actual_url}")
+                if not actual_url.endswith(".pdf"):
+                    sample_text = self.fetch_and_parse_url(actual_url)
+                else:
+                    sample_text = "This is placeholder sample text for pdf content."  # Placeholder for PDF or non-HTML content
+                return sample_text
 
     def create_document(self):
         self.document_path.parent.mkdir(parents=True, exist_ok=True)
@@ -202,14 +190,10 @@ class ProcessData:
 
         try:
             trimmed_data = self.latest_items(data, n=10)
-            new_dict = self.get_feed_info(trimmed_data)
-            flat_items = self.flat_json_text(new_dict)
-            entries = [
-                {"id": i, "text": t, "link": link}
-                for i, t, link in zip(
-                    flat_items["id"], flat_items["text"], flat_items["link"]
-                )
-            ]
+            info = self.get_feed_info(trimmed_data)
+            cols = ("id", "title", "published", "published_fmtd", "link")
+            entries = [dict(zip(cols, vals)) for vals in zip(*(info[c] for c in cols))]
+            
         except (KeyError, TypeError, AttributeError) as exc:
             self.logger.exception("unexpected feed structure")
             result["error"] = f"transform failed: {type(exc).__name__}: {exc}"
@@ -227,13 +211,13 @@ class ProcessData:
             self.logger.exception("failed writing processed data")
             result["error"] = f"write failed: {type(exc).__name__}: {exc}"
             return result
+
         # Use ThreadPoolExecutor to fetch sample text concurrently
         with ThreadPoolExecutor(max_workers=8) as ex:
             futures = {ex.submit(self.get_sample_text, e): e for e in entries}
         for fut in as_completed(futures):
-            futures[fut]["sample_text"] = fut.result()
             entry = futures[fut]
-            entry_id = entry.get("id")
+            entry_id = entry["id"]            
             try:
                 sample = fut.result()
             except Exception as exc:

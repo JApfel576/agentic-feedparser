@@ -1,3 +1,4 @@
+import hashlib
 import json
 from pathlib import Path
 from dotenv import load_dotenv
@@ -22,7 +23,6 @@ class Ingest:
     def __init__(self, source_path: str | Path, target_path: str | Path, logger_name: str | None = None, logger: logging.Logger | None = None):
         self.source_path = Path(source_path)
         self.target_path = Path(target_path)
-        self.filename = self.source_path.name
 
         self.logger_name = logger_name
         self.logger = logger or logging.getLogger(logger_name)
@@ -41,8 +41,9 @@ class Ingest:
     def convert_to_document(self, data):
         try:
             # Convert text to LangChain Document
-            document = [Document(page_content=data, metadata={"source": self.filename})]
-            return document
+            documents = [Document(page_content=data, metadata={"source": self.source_path.parent.parent.name, "file_path": f"{self.source_path.as_posix()}"}),
+            ]
+            return documents
         except Exception as e:
             self.logger.info(f"Error converting file to document: {e}")
             return None
@@ -51,6 +52,15 @@ class Ingest:
         # chunk document
         text_splitter = RecursiveCharacterTextSplitter(chunk_size=chunk_size, chunk_overlap=chunk_overlap)
         chunks = text_splitter.split_documents(document)
+
+        doc_id = hashlib.sha256(self.source_path.as_posix().encode()).hexdigest()[:16]
+
+        for i, chunk in enumerate(chunks):
+            chunk.metadata.update({
+        "doc_id": doc_id,
+        "chunk_index": i,
+        "chunk_count": len(chunks),
+        })
 
         # vectorize and store in Chroma
         # os.environ["OPENAI_API_KEY"] = OPENAI_API_KEY
@@ -83,7 +93,7 @@ class Ingest:
                 return result
 
         except Exception as exc:
-            logger.exception("Failed processing %s", self.source_path)
+            self.logger.exception("Failed processing %s", self.source_path)
             result["error"] = f"Unexpected error processing {self.source_path}: {exc}"
             return result
 

@@ -16,12 +16,12 @@ embedding_model = OpenAIEmbeddings(model="text-embedding-3-small")
 
 # Load the specific Chroma vector store
 vector_store = Chroma(
-    persist_directory="var/data/Anasdaq_com/chroma_db_storage",
+    persist_directory="var/data/chroma_db_storage",
     embedding_function=embedding_model,
 )
 
 results = vector_store.similarity_search(
-    "Where can I find the data feed for more info from Nasdaq?", k=3
+    "Name all file sources in the database?", k=5
 )
 
 for doc in results:
