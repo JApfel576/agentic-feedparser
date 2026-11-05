@@ -66,12 +66,17 @@ This approach avoids scraping entire sites unless the metadata indicates the art
 │   │           └── top_level.txt
 │   ├── feed_agents
 │   │   ├── README.md
+│   │   ├── log
+│   │   │   └── myapp.log
 │   │   ├── pyproject.toml
 │   │   └── src
-│   │       └── feed_agents
-│   │           ├── __init__.py
-│   │           ├── feed_agents.py
-│   │           └── temp.py
+│   │       ├── feed_agents
+│   │       │   ├── __init__.py
+│   │       │   └── feed_agents.py
+│   │       └── var
+│   │           └── data
+│   │               └── chroma_db_storage
+│   │                   └── chroma.sqlite3
 │   ├── feedpoller
 │   │   ├── pyproject.toml
 │   │   └── src
@@ -88,16 +93,11 @@ This approach avoids scraping entire sites unless the metadata indicates the art
 │       ├── README.md
 │       ├── pyproject.toml
 │       └── src
-│           ├── process_data
-│           │   ├── __init__.py
-│           │   ├── ingest.py
-│           │   └── process_data.py
-│           └── process_data.egg-info
-│               ├── PKG-INFO
-│               ├── SOURCES.txt
-│               ├── dependency_links.txt
-│               ├── requires.txt
-│               └── top_level.txt
+│           └── process_data
+│               ├── __init__.py
+│               ├── ingest.py
+│               ├── process_data.py
+│               └── query.py
 ├── pyproject.toml
 ├── query.py
 ├── services
@@ -110,20 +110,56 @@ This approach avoids scraping entire sites unless the metadata indicates the art
 ├── uv.lock
 └── var
     └── data
-        ├── Anasdaq_com
-        │   ├── 20260918_001730.json
+        ├── bloomberg_com
+        │   ├── 20261105_004715.json
         │   ├── document
-        │   │   └── 20260918_001730.json
+        │   │   └── 20261105_004715.txt
         │   ├── processed
-        │   │   └── 20260918_001730.json
+        │   │   └── 20261105_004715.json
         │   └── state.json
-        ├── bbc_com
-        │   ├── 20260515_183820.json
+        ├── briefing_com
+        │   ├── 20261105_004712.json
+        │   ├── document
+        │   │   └── 20261105_004712.txt
+        │   ├── processed
+        │   │   └── 20261105_004712.json
         │   └── state.json
-        └── reuters_com
-            ├── 20260515_183846.json
+        ├── chroma_db_storage
+        │   ├── 203ae349-b8d2-4eec-89ce-d7d51305968d
+        │   │   ├── data_level0.bin
+        │   │   ├── header.bin
+        │   │   ├── length.bin
+        │   │   └── link_lists.bin
+        │   └── chroma.sqlite3
+        ├── cnbc_com
+        │   ├── 20261105_004716.json
+        │   ├── document
+        │   │   └── 20261105_004716.txt
+        │   ├── processed
+        │   │   └── 20261105_004716.json
+        │   └── state.json
+        ├── cnn_com
+        │   ├── 20261105_004714.json
+        │   ├── document
+        │   │   └── 20261105_004714.txt
+        │   ├── processed
+        │   │   └── 20261105_004714.json
+        │   └── state.json
+        ├── finance_yahoo_com
+        │   ├── 20261105_004716.json
+        │   ├── document
+        │   │   └── 20261105_004716.txt
+        │   ├── processed
+        │   │   └── 20261105_004716.json
+        │   └── state.json
+        └── marketwatch_com
+            ├── 20261105_004716.json
+            ├── document
+            │   └── 20261105_004716.txt
+            ├── processed
+            │   └── 20261105_004716.json
             └── state.json
 
-30 directories, 53 files
+48 directories, 71 files
 ```
 <!-- TREE_END -->
