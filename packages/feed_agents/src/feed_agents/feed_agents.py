@@ -20,7 +20,7 @@ import json
 from base_agents import DefaultAgent, make_supervisor_node, MessagesState
 from typing import Annotated, Callable, Literal, TypedDict
 import operator
-from process_data import ProcessData, Ingest
+from process_data import ProcessData, Ingest, VectorStoreQuery
 import logging
 
 # Resolve the project root
@@ -87,7 +87,7 @@ class APISiteEndpoint(BaseModel):
 
 class Subtask(TypedDict):
     id: str
-    team: Literal["request_team", "search_team", "process_team"]
+    team: Literal["request_team", "search_team", "process_team", "query_team"]
     instruction: str
     status: Literal["pending", "completed"]
 
@@ -104,7 +104,7 @@ class SubtaskPlan(BaseModel):
     """Initial decomposition of the user's request into subtasks."""
 
     subtasks: list[Subtask] = Field(
-        description="Each item: {'team': 'request_team'|'search_team'|'process_team', 'instruction': str}"
+        description="Each item: {'team': 'request_team'|'search_team'|'process_team'|'query_team', 'instruction': str}"
     )
 
 
@@ -124,13 +124,32 @@ class SupervisorState(MessagesState):
     # the subtask pending instead of stamping a no-op dispatch as done.
     subtask_blocked: bool
     processed_paths: list[str]  # paths of files successfully processed by process_team
+    query_attempts: int  # how many times human_approval may bounce back to agent before giving up and proceeding to supervisor
+    user_query: str | None  # the query entered by the user
+    query_results: list[
+        dict
+    ]  # results from VectorStoreQuery, for later retrieval by agent
+    storing_error: bool  # True if storing_agent failed to ingest any processed_paths into Chroma DB
 
 
 search = GoogleSerperAPIWrapper(k=5)
 api_host = "http://127.0.0.1:8000"
 MAX_APPROVAL_ATTEMPTS = 3  # how many times human_approval may bounce back to agent before giving up and proceeding to supervisor
+MAX_QUERY_ATTEMPTS = 3  # how many times query_input may bounce back to agent before giving up and proceeding to supervisor
 
-SITES_OUT =["https://www.bloomberg.com/", "https://www.marketwatch.com/", "https://finance.yahoo.com/", "https://www.cnbc.com/", "https://finzer.io/en/blog/best-financial-news-sources", "https://www.briefing.com/", "https://www.reddit.com/r/Bogleheads/comments/1ecalk2/what_are_some_good_news_sources_you_use_for/", "https://www.facebook.com/forbes/posts/text-mining-of-news-releases-shows-which-terms-tend-to-move-stock-prices-both-up/10159217149842509/", "https://www.cnn.com/markets", "https://www.linkedin.com/pulse/top-financial-stock-market-news-sources-barry-d-moore-qotaf"]
+# Temporary sites since Google Serper API credits ran out. These sites will be used for testing purposes.
+SITES_OUT = [
+    "https://www.bloomberg.com/",
+    "https://www.marketwatch.com/",
+    "https://finance.yahoo.com/",
+    "https://www.cnbc.com/",
+    "https://finzer.io/en/blog/best-financial-news-sources",
+    "https://www.briefing.com/",
+    "https://www.reddit.com/r/Bogleheads/comments/1ecalk2/what_are_some_good_news_sources_you_use_for/",
+    "https://www.facebook.com/forbes/posts/text-mining-of-news-releases-shows-which-terms-tend-to-move-stock-prices-both-up/10159217149842509/",
+    "https://www.cnn.com/markets",
+    "https://www.linkedin.com/pulse/top-financial-stock-market-news-sources-barry-d-moore-qotaf",
+]
 
 
 def setup_logging(project_root: str) -> None:
@@ -384,6 +403,42 @@ def ingest_data(source_path: str, target_path: str) -> dict:
     else:
         logging.info("ingest_data wrote %s", report)
     return report
+
+
+def query_vector_store(
+    query: str,
+    k: int = 3,
+    source: str | None = None,
+    mmr: bool = False,
+    fetch_k: int = 40,
+) -> list[dict]:
+    """Query the vector store and return results as a list of dictionaries."""
+    setup_logging(PROJECT_ROOT)
+    logger = logging.getLogger(__name__)
+    print(
+        "pid:",
+        os.getpid(),
+        "| name:",
+        __name__,
+        "| disabled:",
+        logger.disabled,
+        "| propagate:",
+        logger.propagate,
+        "| effective level:",
+        logger.getEffectiveLevel(),
+    )
+    print("root handlers:", logging.getLogger().handlers)
+    logger.warning("probe from agent")
+
+    try:
+        vector_store_query = VectorStoreQuery(logger=logger)
+        results = vector_store_query.search(
+            query=query, k=k, source=source, mmr=mmr, fetch_k=fetch_k
+        )
+        return [result.metadata for result in results]
+    except Exception as e:
+        logging.error("query_vector_store failed for query=%s: %s", query, str(e))
+        return [{"error": str(e)}]
 
 
 def request_team(
@@ -680,16 +735,24 @@ def process_team(
                             f"find_data found no file for {site!r}: {file_path!r}"
                         )
                 except Exception as exc:
-                    logging.exception("processing_agent: cannot locate data for %r", site)
-                    results.append(f"{site}: locate failed ({type(exc).__name__}: {exc})")
+                    logging.exception(
+                        "processing_agent: cannot locate data for %r", site
+                    )
+                    results.append(
+                        f"{site}: locate failed ({type(exc).__name__}: {exc})"
+                    )
                     continue  # don't abort the whole batch
 
                 # Step 2: process it
                 try:
                     report = process_data(file_path)
                 except Exception as exc:
-                    logging.exception("processing_agent: process_data crashed for %s", file_path)
-                    results.append(f"{file_path}: processing crashed ({type(exc).__name__}: {exc})")
+                    logging.exception(
+                        "processing_agent: process_data crashed for %s", file_path
+                    )
+                    results.append(
+                        f"{file_path}: processing crashed ({type(exc).__name__}: {exc})"
+                    )
                     continue
 
                 if report.get("ok"):
@@ -709,48 +772,58 @@ def process_team(
             update={
                 "messages": [AIMessage(content=content, name="processor")],
                 "processed_paths": processed_paths,
-                "dispatched_agents_run": state.get("dispatched_agents_run", []) + ["processor"],
+                "dispatched_agents_run": state.get("dispatched_agents_run", [])
+                + ["processor"],
             },
             goto="supervisor",
         )
 
     def storing_agent(state: SupervisorState) -> Command[Literal["supervisor"]]:
         logging.info("storing agent entered")
-        try:
-            # Step 1: locate the file
-            source_paths = state.get("processed_paths", [None])
-            target_path = DB_DIR  # or any other target path you want to use
-            for source_path in source_paths:
-                if (
-                    not source_path
-                    or not isinstance(source_path, str)
-                    or source_path.startswith("ERROR")
-                ):
-                    raise ValueError(f"Issue with source_path text for{source_path!r}")
-        except Exception as exc:
-            logging.exception("storing_agent: cannot store data for %r", source_path)
-            content = f"Storing failed: {type(exc).__name__}: {exc}"
-            return Command(
-                update={
-                    "messages": [AIMessage(content=content, name="storing_agent")],
-                    "dispatched_agents_run": state.get("dispatched_agents_run", [])
-                    + ["storing_agent"],
-                },
-                goto="supervisor",
-            )
-        # Step 2: process it
+        run_log = state.get("dispatched_agents_run", []) + ["storing_agent"]
+        source_paths = state.get("processed_paths") or []
+
+        stored: list[str] = []
+        failures: list[str] = []
+
+        if not source_paths:
+            failures.append("no processed paths to store")
+
         for source_path in source_paths:
-            report = ingest_data(source_path, target_path)
+            if (
+                not source_path
+                or not isinstance(source_path, str)
+                or source_path.startswith("ERROR")
+            ):
+                failures.append(f"invalid source path {source_path!r}")
+                continue
+            try:
+                report = ingest_data(source_path, DB_DIR)
+            except Exception as exc:
+                logging.exception(
+                    "storing_agent: cannot store data for %r", source_path
+                )
+                failures.append(f"{source_path}: {type(exc).__name__}")
+                continue
             logging.info("report type=%s value=%r", type(report), report)
             if report.get("ok"):
-                content = f"Storing completed successfully. {report.get('ok')}"
+                stored.append(source_path)
             else:
-                content = f"Storing failed for {source_path}: {report.get('error')}"
+                failures.append(f"{source_path}: {report.get('error')}")
+
+        if failures:
+            content = (
+                f"Storing finished with errors. Stored {len(stored)}/{len(source_paths)}. "
+                f"Failures: {'; '.join(failures)}"
+            )
+        else:
+            content = f"Storing completed successfully. Stored {len(stored)} file(s)."
+
         return Command(
             update={
                 "messages": [AIMessage(content=content, name="storing_agent")],
-                "dispatched_agents_run": state.get("dispatched_agents_run", [])
-                + ["storing_agent"],
+                "storing_error": bool(failures),
+                "dispatched_agents_run": run_log,
             },
             goto="supervisor",
         )
@@ -777,6 +850,105 @@ def process_team(
     return builder.compile()
 
 
+def query_team(
+    state: SupervisorState, model, config: RunnableConfig | None
+) -> Callable[[SupervisorState], Command[Literal["supervisor"]]]:
+    def query_input(
+        state: SupervisorState,
+    ) -> Command[Literal["supervisor", "query_input"]]:
+        response = interrupt(
+            {
+                "question": "What is your query for the vector store? (e.g., 'What factors affected stocks the most today?')",
+                "current_instruction": state.get("current_instruction", {}),
+                "approval_type": "query_input",
+            }
+        )
+        user_query = "" if response is None else str(response).strip()
+        attempts = state.get("query_attempts", 0) + 1
+
+        update = {
+            "query_attempts": attempts,
+            "approval_type": "query_input",
+            "dispatched_agents_run": state.get("dispatched_agents_run", [])
+            + ["query_input"],
+        }
+
+        if user_query:
+            return Command(
+                update={**update, "user_query": user_query}, goto="supervisor"
+            )
+
+        if attempts >= MAX_QUERY_ATTEMPTS:
+            return Command(
+                update={
+                    **update,
+                    "user_query": "",
+                    "messages": [
+                        AIMessage(
+                            content=f"No valid query after {attempts} attempts; giving up.",
+                            name="query_input",
+                        )
+                    ],
+                },
+                goto="supervisor",
+            )
+
+        return Command(update=update, goto="query_input")  # re-prompt
+
+    def query_agent(state: SupervisorState) -> Command[Literal["supervisor"]]:
+        query = (state.get("user_query") or "").strip()
+        run_log = state.get("dispatched_agents_run", []) + ["query_agent"]
+
+        try:
+            results = query_vector_store(query=query, k=3, source=None, mmr=False)
+        except Exception:
+            logging.exception("query_vector_store failed for query=%r", query)
+            return Command(
+                update={
+                    "messages": [
+                        AIMessage(
+                            content="Query failed: vector store error.",
+                            name="query_agent",
+                        )
+                    ],
+                    "query_results": [],
+                    "dispatched_agents_run": run_log,
+                },
+                goto="supervisor",
+            )
+
+        summary = (
+            f"Query returned {len(results)} result(s)."
+            if results
+            else "Query returned no results."
+        )
+        return Command(
+            update={
+                "messages": [AIMessage(content=summary, name="query_agent")],
+                "query_results": results,
+                "dispatched_agents_run": run_log,
+            },
+            goto="supervisor",
+        )
+
+    agent_roles = [
+        "query_agent",
+    ]  # used to direct supervisor to agent(s)
+    supervisor_node = make_supervisor_node(
+        model,
+        agent_roles,
+        config=config,
+        additional_instructions="After process team completes. The user must supply the question to run against the vector store. If the user does not supply a question, the query_input agent will re-prompt up to 3 times before giving up.",
+        team_name="query_team",
+    )
+
+    builder = StateGraph(SupervisorState)
+    builder.add_node("query_agent", query_agent)
+    builder.add_node("supervisor", supervisor_node)
+    builder.set_entry_point("supervisor")
+    return builder.compile()
+
+
 def build_top_graph(model_str, config):
     model = init_chat_model(model_str, temperature=0, max_retries=3, timeout=30)
     PLAN_PROMPT = (
@@ -786,6 +958,7 @@ def build_top_graph(model_str, config):
         "- 'search_team': finds relevant sites for a topic and returns full Google "
         "News search URLs.\n\n"
         "- 'process_team': Processes stored data returned by request team. \n\n"
+        "- 'query_team': Queries the vector store with user provided query for relevant information. \n\n"
         "A single team may own multiple subtasks — list them separately, each with "
         "self-contained instruction text covering only that piece of the request."
     )
@@ -819,7 +992,9 @@ def build_top_graph(model_str, config):
 
     def supervisor_node(
         state: SupervisorState, config: RunnableConfig
-    ) -> Command[Literal["request_team", "search_team", "process_team", "__end__"]]:
+    ) -> Command[
+        Literal["request_team", "search_team", "process_team", "query_team", "__end__"]
+    ]:
         # Phase 1: plan subtasks once, on first entry
         if not state.get("subtasks_planned"):
             messages = [SystemMessage(content=PLAN_PROMPT)] + state["messages"]
@@ -911,6 +1086,10 @@ def build_top_graph(model_str, config):
         "process_team",
         process_team(state=None, model=model, config=config),
     )
+    builder.add_node(
+        "query_team",
+        query_team(state=None, model=model, config=config),
+    )
     builder.add_node("mark_subtask_complete", mark_subtask_complete)
 
     builder.set_entry_point("supervisor")
@@ -918,9 +1097,8 @@ def build_top_graph(model_str, config):
     builder.add_edge(
         "request_team", "mark_subtask_complete"
     )  # request_team needs this too
-    builder.add_edge(
-        "process_team", "mark_subtask_complete"
-    )  # request_team needs this too
+    builder.add_edge("process_team", "mark_subtask_complete")
+    builder.add_edge("query_team", "mark_subtask_complete")
     builder.add_edge("mark_subtask_complete", "supervisor")
 
     checkpointer = MemorySaver()
@@ -954,7 +1132,7 @@ if __name__ == "__main__":
         {
             "messages": [
                 HumanMessage(
-                    content=f"Check the health of the API then provide full URLs prefixed as Google News search queries for relevant sites for {topic}. Next, provide those urls from previous step to the API via provide site tool. Lastly, process that data with the process_data team."
+                    content=f"Check the health of the API then provide full URLs prefixed as Google News search queries for relevant sites for {topic}. Next, provide those urls from previous step to the API via provide site tool. Next, process that data with the process_data team. Finally, query the vector store for the relevant information."
                 )
             ]
         }
@@ -974,11 +1152,16 @@ if __name__ == "__main__":
         match payload.get("approval_type"):
             case "searcher":
                 print(payload["question"], payload["search_results"], flush=True)
+                answer = input("yes/no: ")
             case "site_requester":
                 print(payload["question"], payload["current_instruction"], flush=True)
+                answer = input("yes/no: ")
+            case "query_input":
+                print(payload["question"], flush=True)
+                answer = input("Question text: ")
             case _:
                 print(payload.get("question", "Approval needed"), flush=True)
-        answer = input("yes/no: ")
+
         result = run(Command(resume=answer))
 
     print(result)
