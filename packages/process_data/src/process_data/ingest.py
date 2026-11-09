@@ -10,24 +10,28 @@ from langchain_core.documents import Document
 import logging
 
 # Resolve the project root
-# ROOT = Path(__file__).resolve().parents[4]
-# load_dotenv(ROOT / ".env")
+ROOT = Path(__file__).resolve().parents[4]
+load_dotenv(ROOT / ".env")
 
-# OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
-# PROJECT_ROOT = Path(os.environ.get("PROJECT_ROOT", ROOT))
-
-# DB_DIR = os.path.join(PROJECT_ROOT, "var", "data", "chroma_db_storage")
+DEFAULT_PERSIST_DIR = ROOT / "var" / "data" / "chroma_db_storage"
+DEFAULT_COLLECTION = "langchain"  # must match the collection used at ingest
+DEFAULT_EMBEDDING_MODEL = "text-embedding-3-small"  # must match ingest
 
 class Ingest:
-    def __init__(self, source_path: str | Path, target_path: str | Path, logger_name: str | None = None, logger: logging.Logger | None = None):
+    def __init__(self, source_path: str | Path, target_path: str | Path, logger_name: str | None = None, collection_name: str = DEFAULT_COLLECTION, logger: logging.Logger | None = None):
         self.source_path = Path(source_path)
-        self.target_path = Path(target_path)
+        self.target_path = Path(target_path) if target_path else DEFAULT_PERSIST_DIR
 
         self.logger_name = logger_name
         self.logger = logger or logging.getLogger(logger_name)
 
         self.target_path.mkdir(parents=True, exist_ok=True)
+
+        self.embedding_model = OpenAIEmbeddings(model=DEFAULT_EMBEDDING_MODEL)
+
+        self.collection_name = collection_name
 
     def read_file(self):
         try:
@@ -63,11 +67,8 @@ class Ingest:
         })
 
         # vectorize and store in Chroma
-        # os.environ["OPENAI_API_KEY"] = OPENAI_API_KEY
-        embedding_model = OpenAIEmbeddings(model="text-embedding-3-small")
-
         vector_db = Chroma.from_documents(
-            chunks, embedding_model, persist_directory=Path(str(self.target_path))
+            chunks, self.embedding_model, persist_directory=Path(str(self.target_path)), collection_name=self.collection_name
         )
 
         return f"Successfully vectorized and stored {len(chunks)} chunks."
@@ -99,3 +100,26 @@ class Ingest:
 
         result["ok"] = f"Successfully processed file: {self.source_path}"
         return result
+
+if __name__ == "__main__":
+    OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+    file_paths = ["C:/Users/japfe/Documents/genai-pipeline-project/var/data/cnn_com/document/20261105_004714.txt",
+    "C:/Users/japfe/Documents/genai-pipeline-project/var/data/finance_yahoo_com/document/20261105_004716.txt"]
+    for file_path in file_paths:
+        target_dir = Path("var/data/chroma_db_storage")
+        ingest = Ingest(source_path=file_path, target_path=target_dir, logger_name="IngestLogger")
+        result = ingest.run()
+        if result["ok"]:
+            print(result["ok"])
+        else:
+            print(result["error"])
+
+    import chromadb
+    from collections import Counter
+
+    client = chromadb.PersistentClient(path=str(target_dir))  # same str(target_path) as ingest
+    for col in client.list_collections():
+        name = getattr(col, "name", col)
+        c = client.get_collection(name)
+        metas = c.get(include=["metadatas"])["metadatas"]
+        print(name, c.count(), Counter(m["file_path"] for m in metas))
