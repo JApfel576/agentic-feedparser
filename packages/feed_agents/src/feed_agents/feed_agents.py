@@ -435,7 +435,10 @@ def query_vector_store(
         results = vector_store_query.search(
             query=query, k=k, source=source, mmr=mmr, fetch_k=fetch_k
         )
-        return [result.metadata for result in results]
+        return [
+            {"content": result.page_content, "metadata": result.metadata}
+            for result in results
+        ]
     except Exception as e:
         logging.error("query_vector_store failed for query=%s: %s", query, str(e))
         return [{"error": str(e)}]
@@ -932,6 +935,7 @@ def query_team(
         )
 
     agent_roles = [
+        "query_input",
         "query_agent",
     ]  # used to direct supervisor to agent(s)
     supervisor_node = make_supervisor_node(
@@ -943,6 +947,7 @@ def query_team(
     )
 
     builder = StateGraph(SupervisorState)
+    builder.add_node("query_input", query_input)
     builder.add_node("query_agent", query_agent)
     builder.add_node("supervisor", supervisor_node)
     builder.set_entry_point("supervisor")

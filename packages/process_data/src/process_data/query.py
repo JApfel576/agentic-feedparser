@@ -30,7 +30,9 @@ class VectorStoreQuery:
 
         self.persist_directory = Path(persist_directory).resolve()
         if not self.persist_directory.exists():
-            raise FileNotFoundError(f"Chroma directory not found: {self.persist_directory}")
+            raise FileNotFoundError(
+                f"Chroma directory not found: {self.persist_directory}"
+            )
 
         self.store = Chroma(
             collection_name=collection_name,
@@ -41,7 +43,9 @@ class VectorStoreQuery:
         count = self.store._collection.count()
         self.logger.info(
             "Opened collection=%s dir=%s count=%d",
-            collection_name, self.persist_directory, count,
+            collection_name,
+            self.persist_directory,
+            count,
         )
         if count == 0:
             raise RuntimeError(
@@ -69,7 +73,9 @@ class VectorStoreQuery:
             self.logger.exception("Search failed for query=%r", query)
             raise
 
-    def search_per_source(self, query: str, sources: list[str], k_each: int = 2) -> list[Document]:
+    def search_per_source(
+        self, query: str, sources: list[str], k_each: int = 2
+    ) -> list[Document]:
         """Guarantee coverage across outlets: k_each hits from every source."""
         results: list[Document] = []
         for src in sources:
@@ -89,7 +95,3 @@ if __name__ == "__main__":
     query = "What factors affected stocks the most today?"
 
     vq.print_results(vq.search(query, k=3))
-
-    # Mixed sources:
-    # vq.print_results(vq.search(query, k=8, mmr=True))
-    # vq.print_results(vq.search_per_source(query, ["cnn_com", "bloomberg_com", "cnbc_com", "finance_yahoo_com"]))
