@@ -99,7 +99,6 @@ This approach avoids scraping entire sites unless the metadata indicates the art
 │               ├── process_data.py
 │               └── query.py
 ├── pyproject.toml
-├── query.py
 ├── services
 │   └── fastapi_app
 │       ├── log
@@ -160,6 +159,6 @@ This approach avoids scraping entire sites unless the metadata indicates the art
             │   └── 20261105_004716.json
             └── state.json
 
-48 directories, 71 files
+48 directories, 70 files
 ```
 <!-- TREE_END -->
