@@ -9,6 +9,8 @@ from pathlib import Path
 import logging
 import os
 from dotenv import load_dotenv
+from .sub_app import sub_app
+from contextlib import asynccontextmanager
 
 
 class Website(BaseModel):
@@ -61,8 +63,14 @@ console.setLevel(logging.INFO)
 # add the handler to the root logger
 logging.getLogger("").addHandler(console)
 
-app = FastAPI()
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    async with sub_app.router.lifespan_context(sub_app):
+        yield
 
+app = FastAPI(lifespan=lifespan, title="Main App", version="1.0.0")
+
+app.mount("/sub", sub_app)
 
 def check_url(url_input: str) -> str:
     """Ensure url is proper format"""
@@ -80,6 +88,7 @@ _SITE_Q = re.compile(
     r"(?:^|\s)site:(?P<domain>[a-z0-9-]+(?:\.[a-z0-9-]+)+)(?P<path>/\S*)?(?=\s|$)",
     re.IGNORECASE,
 )
+
 
 def _slug(site: str) -> str:
     """'https://news.google.com/search?q=site:reuters.com%20stock%20market' -> 'reuters_com'"""
@@ -107,6 +116,7 @@ def convert_to_rss(url_input: str) -> str:
         raise ValueError(f"unexpected path {parsed.path!r}")
 
     return urlunparse(parsed._replace(path="/rss" + parsed.path))
+
 
 def recent_feed_data(path: str) -> str:
     """Get most recent file name for feed data"""
@@ -144,6 +154,7 @@ def rss_endpoint(url_input: RssUrl):
 
 
 from fastapi import HTTPException
+
 
 @app.get("/data", response_model=Model)
 def feed_data(url_input: RssUrl) -> Any:

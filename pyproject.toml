@@ -83,6 +83,7 @@ dependencies = [
     "chroma>=0.2.0",
     "langchain-chroma>=1.1.0",
     "process-data",
+    "feed-agents",
 ]
 
 [tool.fastapi]
@@ -95,13 +96,14 @@ members = [
     "packages/feed_agents",
     "packages/base_agents",
     "packages/process_data",
-    "services/fastapi_app/src",
+    "services/fastapi_app",
 ]
 
 [tool.uv.sources]
 feedpoller = { workspace = true }
 base-agents = { workspace = true }
 process-data = { workspace = true }
+feed-agents = { workspace = true }
 
 [dependency-groups]
 dev = [
