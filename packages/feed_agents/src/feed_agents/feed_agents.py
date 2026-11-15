@@ -1109,8 +1109,7 @@ def build_top_graph(model_str, config):
     checkpointer = MemorySaver()
     return builder.compile(checkpointer=checkpointer)
 
-
-if __name__ == "__main__":
+def run(auto_answer: str | None = None):
     setup_logging(PROJECT_ROOT)
     topic = "latest reliable news source affecting stock market"
     # recursion_limit kept low so a routing regression surfaces immediately instead of
@@ -1121,7 +1120,7 @@ if __name__ == "__main__":
     config = {"configurable": {"thread_id": str(uuid.uuid4())}, "recursion_limit": 40}
     graph = build_top_graph(model_str="openai:gpt-5.4-mini", config=config)
 
-    def run(payload):
+    def invoke(payload):
         """Every invoke goes through here — the resume calls need the same traceback
         handling as the first one, otherwise an error mid-loop kills the approval prompts
         with a bare stack trace and the remaining interrupts are never shown."""
@@ -1133,7 +1132,12 @@ if __name__ == "__main__":
             traceback.print_exc()
             raise
 
-    result = run(
+    def ask(prompt: str) -> str:
+        if auto_answer is not None:
+            return auto_answer
+        return input(prompt)
+
+    result = invoke(
         {
             "messages": [
                 HumanMessage(
@@ -1157,16 +1161,20 @@ if __name__ == "__main__":
         match payload.get("approval_type"):
             case "searcher":
                 print(payload["question"], payload["search_results"], flush=True)
-                answer = input("yes/no: ")
+                answer = ask("yes/no: ")
             case "site_requester":
                 print(payload["question"], payload["current_instruction"], flush=True)
-                answer = input("yes/no: ")
+                answer = ask("yes/no: ")
             case "query_input":
                 print(payload["question"], flush=True)
-                answer = input("Question text: ")
+                answer = ask("Question text: ")
             case _:
                 print(payload.get("question", "Approval needed"), flush=True)
 
-        result = run(Command(resume=answer))
+        result = invoke(Command(resume=answer))
+        print(type(result), result)
 
-    print(result)
+    return result
+
+if __name__ == "__main__":
+    run()
