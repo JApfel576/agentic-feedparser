@@ -954,7 +954,7 @@ def query_team(
     return builder.compile()
 
 
-def build_top_graph(model_str, config):
+def build_top_graph(model_str, config, checkpointer) -> StateGraph[SupervisorState]:
     model = init_chat_model(model_str, temperature=0, max_retries=3, timeout=30)
     PLAN_PROMPT = (
         "Break the user's request into independent subtasks. Each subtask goes to "
@@ -1106,7 +1106,9 @@ def build_top_graph(model_str, config):
     builder.add_edge("query_team", "mark_subtask_complete")
     builder.add_edge("mark_subtask_complete", "supervisor")
 
-    checkpointer = MemorySaver()
+    if checkpointer is None:
+        checkpointer = MemorySaver()
+
     return builder.compile(checkpointer=checkpointer)
 
 def run(auto_answer: str | None = None):
